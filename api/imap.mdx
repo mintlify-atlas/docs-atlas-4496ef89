@@ -1,0 +1,343 @@
+---
+title: "IMap API"
+description: "Reference for IMap, Hazelcast's concurrent, distributed, observable, and queryable map. Covers CRUD, async operations, TTL, predicate queries, entry processors, locking, listeners, and indexes."
+---
+
+`IMap<K, V>` is Hazelcast's primary distributed data structure. It implements `java.util.concurrent.ConcurrentMap` but **intentionally violates** that interface's general contract.
+
+<Warning>
+`IMap` uses the **serialized (binary) form** of keys for `hashCode` and `equals` comparisons, not the Java object implementations. Values returned by `get` are clones — modifying them locally does not change the distributed map. You must `put` the modified value back to propagate changes.
+</Warning>
+
+Obtain an `IMap` from `HazelcastInstance`:
+
+```java
+IMap<String, Order> orders = hz.getMap("orders");
+```
+
+---
+
+## CRUD operations
+
+<AccordionGroup>
+
+<Accordion title="Basic put and get">
+
+```java
+V put(K key, V value)
+```
+Associates the specified value with the specified key. Returns the previous value, or `null` if there was no mapping. Prefer `set` when the previous value is not needed.
+
+```java
+V get(Object key)
+```
+Returns a **clone** of the value associated with the key. Returns `null` if the key is not present.
+
+```java
+V getOrDefault(Object key, V defaultValue)
+```
+Returns the mapped value, or `defaultValue` if no mapping exists.
+
+```java
+void set(K key, V value)
+```
+Associates the key with the value without returning the old value. Slightly more efficient than `put` when you do not need the previous value.
+
+```java
+// Example
+orders.put("ORD-001", new Order("Widget", 5));
+Order o = orders.get("ORD-001");
+orders.set("ORD-001", new Order("Widget", 10)); // no return value needed
+```
+
+</Accordion>
+
+<Accordion title="Remove and delete">
+
+```java
+V remove(Object key)
+```
+Removes the mapping and returns the previous value. Triggers a `MapStore.delete` if a map store is configured.
+
+```java
+boolean remove(Object key, Object value)
+```
+Removes the mapping only if the key is currently mapped to the given value.
+
+```java
+void delete(Object key)
+```
+Removes the mapping **without** returning the old value. More efficient than `remove` when the previous value is not needed. Note that `EntryListener` will receive a `null` old value for this operation.
+
+```java
+void removeAll(Predicate<K, V> predicate)
+```
+Removes all entries matching the given predicate. Uses an index if one is available, otherwise performs a full scan.
+
+```java
+// Example
+orders.delete("ORD-001");
+orders.removeAll(Predicates.sql("status = 'CANCELLED'"));
+```
+
+</Accordion>
+
+<Accordion title="Replace">
+
+```java
+V replace(K key, V value)
+```
+Replaces the entry only if the key currently has a mapping. Returns the previous value.
+
+```java
+boolean replace(K key, V oldValue, V newValue)
+```
+Replaces the entry only if the key is currently mapped to `oldValue`.
+
+```java
+orders.replace("ORD-001", new Order("Widget", 20));
+```
+
+</Accordion>
+
+<Accordion title="Bulk operations">
+
+```java
+void putAll(Map<? extends K, ? extends V> m)
+```
+Copies all mappings from the given map. Not atomic — partial writes can occur on failure.
+
+```java
+Map<K, V> getAll(Set<K> keys)
+```
+Returns an immutable map of the requested keys. Keys missing from the map (and not in the map store) are absent from the result.
+
+```java
+// Example
+Map<String, Order> bulk = new HashMap<>();
+bulk.put("ORD-002", new Order("Gadget", 1));
+bulk.put("ORD-003", new Order("Gizmo", 3));
+orders.putAll(bulk);
+
+Set<String> keys = Set.of("ORD-001", "ORD-002");
+Map<String, Order> fetched = orders.getAll(keys);
+```
+
+</Accordion>
+
+</AccordionGroup>
+
+---
+
+## TTL and expiration
+
+```java
+V put(K key, V value, long ttl, TimeUnit ttlUnit)
+```
+Puts the entry with an explicit TTL. The entry is evicted after the TTL expires. Pass `0` for infinite lifetime; pass a negative value to use the map's configured TTL.
+
+```java
+V put(K key, V value, long ttl, TimeUnit ttlUnit, long maxIdle, TimeUnit maxIdleUnit)
+```
+Puts the entry with both a TTL and a max-idle timeout.
+
+```java
+boolean setTtl(K key, long ttl, TimeUnit timeUnit)
+```
+Updates the TTL of an existing entry without changing its value. Returns `true` if the entry exists and the TTL was updated.
+
+```java
+// Entry expires in 30 seconds
+orders.put("ORD-TEMP", new Order("Sample", 1), 30, TimeUnit.SECONDS);
+
+// Update TTL for an existing key
+orders.setTtl("ORD-001", 1, TimeUnit.HOURS);
+```
+
+---
+
+## Async operations
+
+Async methods return a `CompletionStage<V>` so you can chain callbacks or call `.toCompletableFuture().get()` to block.
+
+```java
+CompletionStage<V> getAsync(K key)
+CompletionStage<V> putAsync(K key, V value)
+CompletionStage<V> putAsync(K key, V value, long ttl, TimeUnit ttlUnit)
+CompletionStage<Void> setAsync(K key, V value)
+CompletionStage<Void> setAsync(K key, V value, long ttl, TimeUnit ttlUnit)
+CompletionStage<V> removeAsync(K key)
+```
+
+```java
+// Non-blocking put with callback
+CompletionStage<Order> future = orders.putAsync("ORD-004", new Order("Sprocket", 2));
+future.thenAccept(prev -> System.out.println("Previous value: " + prev));
+```
+
+---
+
+## Predicate queries
+
+Query the map without deserializing all values. When an index exists for the queried attribute, queries use it automatically.
+
+```java
+Collection<V> values(Predicate<K, V> predicate)
+Set<K> keySet(Predicate<K, V> predicate)
+Set<Map.Entry<K, V>> entrySet(Predicate<K, V> predicate)
+```
+
+```java
+import com.hazelcast.query.Predicates;
+
+// Find all pending orders
+Predicate<String, Order> pending = Predicates.equal("status", "PENDING");
+Collection<Order> results = orders.values(pending);
+
+// SQL-style predicate
+Collection<Order> large = orders.values(Predicates.sql("quantity > 10"));
+```
+
+<Tip>
+Use `Predicates.sql(String)` for a familiar syntax, or build type-safe predicates with `Predicates.and()`, `Predicates.or()`, and `Predicates.equal()` etc.
+</Tip>
+
+---
+
+## Projection
+
+Extract a subset of fields server-side to reduce network transfer.
+
+```java
+<R> Collection<R> project(Projection<Map.Entry<K, V>, R> projection)
+<R> Collection<R> project(Projection<Map.Entry<K, V>, R> projection, Predicate<K, V> predicate)
+```
+
+```java
+import com.hazelcast.projection.Projections;
+
+// Retrieve only the "status" field of all orders
+Collection<String> statuses = orders.project(
+    Projections.singleAttribute("status")
+);
+```
+
+---
+
+## Entry processors
+
+Entry processors run server-side on a single entry, atomically combining a read and a write in one distributed call.
+
+```java
+<R> R executeOnKey(Object key, EntryProcessor<K, V, R> entryProcessor)
+<R> Map<K, R> executeOnKeys(Set<K> keys, EntryProcessor<K, V, R> entryProcessor)
+<R> Map<K, R> executeOnEntries(EntryProcessor<K, V, R> entryProcessor)
+<R> Map<K, R> executeOnEntries(EntryProcessor<K, V, R> entryProcessor, Predicate<K, V> predicate)
+<R> CompletionStage<R> submitToKey(Object key, EntryProcessor<K, V, R> entryProcessor)
+```
+
+```java
+// Atomically increment a quantity field
+orders.executeOnKey("ORD-001", entry -> {
+    Order o = entry.getValue();
+    o.setQuantity(o.getQuantity() + 1);
+    entry.setValue(o);
+    return null;
+});
+```
+
+<Note>
+`executeOnKey` and `submitToKey` respect key locks. `executeOnEntries` and `executeOnKeys` do **not** check locks — they process entries regardless of lock state.
+</Note>
+
+---
+
+## Locking
+
+`IMap` provides pessimistic, key-level distributed locking.
+
+```java
+void lock(K key)
+void lock(K key, long leaseTime, TimeUnit timeUnit)
+boolean tryLock(K key)
+boolean tryLock(K key, long time, TimeUnit timeUnit)
+boolean tryLock(K key, long time, TimeUnit timeUnit, long leaseTime, TimeUnit leaseTimeUnit)
+void unlock(K key)
+void forceUnlock(K key)
+boolean isLocked(K key)
+```
+
+```java
+orders.lock("ORD-001");
+try {
+    Order o = orders.get("ORD-001");
+    o.setStatus("PROCESSING");
+    orders.put("ORD-001", o);
+} finally {
+    orders.unlock("ORD-001");
+}
+```
+
+<Warning>
+Locks are reentrant per thread. Always unlock in a `finally` block. Use `lock(key, leaseTime, unit)` to set an automatic expiry in case the locking member crashes.
+</Warning>
+
+---
+
+## Entry listeners
+
+```java
+UUID addEntryListener(MapListener listener, boolean includeValue)
+UUID addEntryListener(MapListener listener, K key, boolean includeValue)
+UUID addEntryListener(MapListener listener, Predicate<K, V> predicate, boolean includeValue)
+boolean removeEntryListener(UUID registrationId)
+```
+
+```java
+UUID id = orders.addEntryListener(new EntryAddedListener<String, Order>() {
+    @Override
+    public void entryAdded(EntryEvent<String, Order> event) {
+        System.out.println("New order: " + event.getKey());
+    }
+}, true);
+
+// Later, to remove:
+orders.removeEntryListener(id);
+```
+
+---
+
+## Indexes
+
+Indexes speed up predicate queries and aggregations. Add them programmatically or via configuration.
+
+```java
+void addIndex(IndexType type, String... attributes)
+void addIndex(IndexConfig indexConfig)
+```
+
+```java
+import com.hazelcast.config.IndexType;
+
+// Sorted index on status (good for range queries)
+orders.addIndex(IndexType.SORTED, "status");
+
+// Hash index on customerId (equality queries only, lower overhead)
+orders.addIndex(IndexType.HASH, "customerId");
+```
+
+---
+
+## Local map statistics
+
+```java
+LocalMapStats getLocalMapStats()
+```
+
+Returns statistics for the local partition of the map, including entry count, memory cost, hit/miss counts, and operation counts.
+
+```java
+LocalMapStats stats = orders.getLocalMapStats();
+System.out.println("Owned entry count: " + stats.getOwnedEntryCount());
+System.out.println("Get operations:    " + stats.getGetOperationCount());
+```

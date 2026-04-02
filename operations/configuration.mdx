@@ -1,0 +1,441 @@
+---
+title: "Configuration"
+description: "Configure Hazelcast using the Java Config API, XML, or YAML. This page covers the three configuration methods, key settings for networking, maps, and the Jet engine, and how to load configuration from a file."
+---
+
+Hazelcast supports three configuration methods: programmatic (Java Config API), XML (`hazelcast.xml`), and YAML (`hazelcast.yaml`). You can use any of these methods independently or combine them.
+
+## Configuration methods
+
+<Tabs>
+  <Tab title="Java (programmatic)">
+    Create a `Config` object directly in Java and pass it to `Hazelcast.newHazelcastInstance`:
+
+    ```java
+    import com.hazelcast.config.Config;
+    import com.hazelcast.core.Hazelcast;
+    import com.hazelcast.core.HazelcastInstance;
+
+    Config config = new Config();
+    config.setClusterName("my-cluster");
+    config.setInstanceName("my-member");
+
+    HazelcastInstance hz = Hazelcast.newHazelcastInstance(config);
+    ```
+
+    The `Config` class (`com.hazelcast.config.Config`) is the root configuration object. Its default cluster name is `"dev"` (defined as `Config.DEFAULT_CLUSTER_NAME`). You can also share a `Config` instance across threads, but do not modify it after creating a `HazelcastInstance`.
+  </Tab>
+  <Tab title="XML">
+    Place a `hazelcast.xml` file in the working directory or on the classpath. Hazelcast discovers it automatically on startup.
+
+    ```xml hazelcast.xml
+    <?xml version="1.0" encoding="UTF-8"?>
+    <hazelcast xmlns="http://www.hazelcast.com/schema/config"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xsi:schemaLocation="http://www.hazelcast.com/schema/config
+               http://www.hazelcast.com/schema/config/hazelcast-config-5.8.xsd">
+
+        <cluster-name>my-cluster</cluster-name>
+
+        <network>
+            <port auto-increment="true" port-count="100">5701</port>
+            <join>
+                <auto-detection enabled="true"/>
+                <multicast enabled="false"/>
+                <tcp-ip enabled="false"/>
+            </join>
+        </network>
+
+    </hazelcast>
+    ```
+
+    You can also load a specific XML file programmatically using `XmlConfigBuilder`:
+
+    ```java
+    import com.hazelcast.config.Config;
+    import com.hazelcast.config.XmlConfigBuilder;
+
+    Config config = new XmlConfigBuilder("path/to/hazelcast.xml").build();
+    HazelcastInstance hz = Hazelcast.newHazelcastInstance(config);
+    ```
+
+    `XmlConfigBuilder` accepts a filename, an `InputStream`, or a `URL`. Note that configurations built this way do not apply overrides from environment variables or system properties.
+  </Tab>
+  <Tab title="YAML">
+    Place a `hazelcast.yaml` file in the working directory or on the classpath.
+
+    ```yaml hazelcast.yaml
+    hazelcast:
+      cluster-name: my-cluster
+
+      network:
+        port:
+          auto-increment: true
+          port-count: 100
+          port: 5701
+        join:
+          auto-detection:
+            enabled: true
+          multicast:
+            enabled: false
+          tcp-ip:
+            enabled: false
+    ```
+
+    Load it programmatically using `YamlConfigBuilder`:
+
+    ```java
+    import com.hazelcast.config.Config;
+    import com.hazelcast.config.YamlConfigBuilder;
+
+    Config config = new YamlConfigBuilder("path/to/hazelcast.yaml").build();
+    HazelcastInstance hz = Hazelcast.newHazelcastInstance(config);
+    ```
+
+    `YamlConfigBuilder` is compatible with the YAML 1.2 specification and supports JSON Schema. Like `XmlConfigBuilder`, it does not apply environment variable or system property overrides.
+  </Tab>
+</Tabs>
+
+## Auto-loading configuration
+
+Use `Config.load()` to load configuration from well-known locations with environment variable and system property overrides applied:
+
+```java
+Config config = Config.load();
+HazelcastInstance hz = Hazelcast.newHazelcastInstance(config);
+```
+
+Hazelcast checks these locations in order:
+
+1. The file path or classpath resource set by the `hazelcast.config` system property
+2. `hazelcast.xml` in the working directory
+3. `hazelcast.xml` on the classpath
+4. `hazelcast.yaml` in the working directory
+5. `hazelcast.yaml` on the classpath
+6. Built-in defaults
+
+## Cluster name
+
+Every member in a cluster must share the same cluster name. The default is `"dev"`.
+
+<CodeGroup>
+
+```java Java
+Config config = new Config();
+config.setClusterName("my-cluster");
+```
+
+```xml XML
+<cluster-name>my-cluster</cluster-name>
+```
+
+```yaml YAML
+hazelcast:
+  cluster-name: my-cluster
+```
+
+</CodeGroup>
+
+## Network configuration
+
+### Port
+
+By default, Hazelcast binds on port `5701`. If that port is taken, it tries up to 100 consecutive ports (`5701`–`5800`).
+
+<CodeGroup>
+
+```java Java
+import com.hazelcast.config.NetworkConfig;
+
+NetworkConfig network = config.getNetworkConfig();
+network.setPort(5701);
+network.setPortCount(100);
+network.setPortAutoIncrement(true);
+```
+
+```xml XML
+<network>
+    <port auto-increment="true" port-count="100">5701</port>
+</network>
+```
+
+```yaml YAML
+hazelcast:
+  network:
+    port:
+      auto-increment: true
+      port-count: 100
+      port: 5701
+```
+
+</CodeGroup>
+
+### Interface binding
+
+Restrict which network interfaces Hazelcast listens on:
+
+<CodeGroup>
+
+```java Java
+import com.hazelcast.config.InterfacesConfig;
+
+config.getNetworkConfig()
+      .getInterfaces()
+      .setEnabled(true)
+      .addInterface("10.10.1.*");
+```
+
+```xml XML
+<network>
+    <interfaces enabled="true">
+        <interface>10.10.1.*</interface>
+    </interfaces>
+</network>
+```
+
+```yaml YAML
+hazelcast:
+  network:
+    interfaces:
+      enabled: true
+      interfaces:
+        - 10.10.1.*
+```
+
+</CodeGroup>
+
+### Join configuration
+
+Hazelcast supports several member discovery mechanisms. Enable only one at a time.
+
+<Tabs>
+  <Tab title="Multicast">
+    Multicast is the simplest mechanism for local networks. It does not work in most cloud environments.
+
+    <CodeGroup>
+
+    ```java Java
+    import com.hazelcast.config.MulticastConfig;
+
+    config.getNetworkConfig().getJoin()
+          .getMulticastConfig()
+          .setEnabled(true)
+          .setMulticastGroup("224.2.2.3")
+          .setMulticastPort(54327);
+    ```
+
+    ```xml XML
+    <network>
+        <join>
+            <multicast enabled="true">
+                <multicast-group>224.2.2.3</multicast-group>
+                <multicast-port>54327</multicast-port>
+            </multicast>
+        </join>
+    </network>
+    ```
+
+    ```yaml YAML
+    hazelcast:
+      network:
+        join:
+          multicast:
+            enabled: true
+            multicast-group: 224.2.2.3
+            multicast-port: 54327
+    ```
+
+    </CodeGroup>
+  </Tab>
+  <Tab title="TCP/IP">
+    Specify a static list of member addresses. Suitable for on-premise environments where member IPs are known.
+
+    <CodeGroup>
+
+    ```java Java
+    import com.hazelcast.config.TcpIpConfig;
+
+    config.getNetworkConfig().getJoin()
+          .getMulticastConfig().setEnabled(false);
+    config.getNetworkConfig().getJoin()
+          .getTcpIpConfig()
+          .setEnabled(true)
+          .addMember("10.0.0.1")
+          .addMember("10.0.0.2");
+    ```
+
+    ```xml XML
+    <network>
+        <join>
+            <multicast enabled="false"/>
+            <tcp-ip enabled="true">
+                <member-list>
+                    <member>10.0.0.1</member>
+                    <member>10.0.0.2</member>
+                </member-list>
+            </tcp-ip>
+        </join>
+    </network>
+    ```
+
+    ```yaml YAML
+    hazelcast:
+      network:
+        join:
+          multicast:
+            enabled: false
+          tcp-ip:
+            enabled: true
+            member-list:
+              - 10.0.0.1
+              - 10.0.0.2
+    ```
+
+    </CodeGroup>
+  </Tab>
+  <Tab title="Kubernetes">
+    Use the Kubernetes API for service discovery when running inside a Kubernetes cluster.
+
+    <CodeGroup>
+
+    ```java Java
+    config.getNetworkConfig().getJoin()
+          .getMulticastConfig().setEnabled(false);
+    config.getNetworkConfig().getJoin()
+          .getKubernetesConfig()
+          .setEnabled(true)
+          .setProperty("namespace", "default")
+          .setProperty("service-name", "hazelcast-service");
+    ```
+
+    ```xml XML
+    <network>
+        <join>
+            <multicast enabled="false"/>
+            <kubernetes enabled="true">
+                <namespace>default</namespace>
+                <service-name>hazelcast-service</service-name>
+            </kubernetes>
+        </join>
+    </network>
+    ```
+
+    ```yaml YAML
+    hazelcast:
+      network:
+        join:
+          multicast:
+            enabled: false
+          kubernetes:
+            enabled: true
+            namespace: default
+            service-name: hazelcast-service
+    ```
+
+    </CodeGroup>
+  </Tab>
+</Tabs>
+
+## Map configuration
+
+Configure the `MapConfig` to control backup count, eviction, and TTL for your distributed maps:
+
+<CodeGroup>
+
+```java Java
+import com.hazelcast.config.MapConfig;
+import com.hazelcast.config.EvictionConfig;
+import com.hazelcast.config.EvictionPolicy;
+import com.hazelcast.config.MaxSizePolicy;
+
+MapConfig mapConfig = new MapConfig("orders");
+mapConfig.setBackupCount(1);
+mapConfig.setAsyncBackupCount(0);
+mapConfig.setTimeToLiveSeconds(3600);
+mapConfig.setMaxIdleSeconds(600);
+mapConfig.getEvictionConfig()
+         .setEvictionPolicy(EvictionPolicy.LRU)
+         .setMaxSizePolicy(MaxSizePolicy.PER_NODE)
+         .setSize(10000);
+
+config.addMapConfig(mapConfig);
+```
+
+```xml XML
+<map name="orders">
+    <backup-count>1</backup-count>
+    <async-backup-count>0</async-backup-count>
+    <time-to-live-seconds>3600</time-to-live-seconds>
+    <max-idle-seconds>600</max-idle-seconds>
+    <eviction eviction-policy="LRU"
+              max-size-policy="PER_NODE"
+              size="10000"/>
+</map>
+```
+
+```yaml YAML
+hazelcast:
+  map:
+    orders:
+      backup-count: 1
+      async-backup-count: 0
+      time-to-live-seconds: 3600
+      max-idle-seconds: 600
+      eviction:
+        eviction-policy: LRU
+        max-size-policy: PER_NODE
+        size: 10000
+```
+
+</CodeGroup>
+
+## Jet engine configuration
+
+The Hazelcast Jet stream-processing engine is disabled by default. Enable it and tune thread counts:
+
+<CodeGroup>
+
+```java Java
+import com.hazelcast.jet.config.JetConfig;
+
+JetConfig jetConfig = config.getJetConfig();
+jetConfig.setEnabled(true);
+jetConfig.setResourceUploadEnabled(false);
+jetConfig.setCooperativeThreadCount(Runtime.getRuntime().availableProcessors());
+```
+
+```xml XML
+<jet enabled="true" resource-upload-enabled="false">
+    <flow-control-period>100</flow-control-period>
+    <backup-count>1</backup-count>
+    <scale-up-delay-millis>10000</scale-up-delay-millis>
+    <lossless-restart-enabled>false</lossless-restart-enabled>
+    <max-processor-accumulated-records>9223372036854775807</max-processor-accumulated-records>
+    <edge-defaults>
+        <queue-size>1024</queue-size>
+        <packet-size-limit>16384</packet-size-limit>
+        <receive-window-multiplier>3</receive-window-multiplier>
+    </edge-defaults>
+</jet>
+```
+
+```yaml YAML
+hazelcast:
+  jet:
+    enabled: true
+    resource-upload-enabled: false
+    flow-control-period: 100
+    backup-count: 1
+    scale-up-delay-millis: 10000
+    lossless-restart-enabled: false
+    edge-defaults:
+      queue-size: 1024
+      packet-size-limit: 16384
+      receive-window-multiplier: 3
+```
+
+</CodeGroup>
+
+<Note>
+Lossless Jet job restart requires Hazelcast Enterprise and depends on the Persistence feature. Enable and configure Persistence before enabling `lossless-restart-enabled`.
+</Note>

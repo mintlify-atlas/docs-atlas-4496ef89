@@ -1,0 +1,197 @@
+---
+title: "WAN replication"
+description: "Replicate Hazelcast data across datacenters and cloud regions using WAN replication. This page covers active-passive and active-active topologies, WanReplicationConfig, WanBatchPublisherConfig, and WAN sync."
+---
+
+WAN (Wide Area Network) replication lets you keep multiple Hazelcast clusters synchronized across datacenters or cloud regions. Changes made in one cluster are asynchronously forwarded to one or more target clusters.
+
+<Note>
+The built-in WAN batch publisher (`WanBatchPublisherConfig`) is a **Hazelcast Enterprise** feature. Active-active replication with conflict resolution also requires Enterprise.
+</Note>
+
+## Replication topologies
+
+**Active-passive**: One cluster handles all writes; changes flow to a passive standby cluster that serves reads and takes over on failover.
+
+**Active-active**: Both clusters accept writes and replicate to each other. Conflict resolution is required because the same key can be updated concurrently in both clusters.
+
+Configure the topology by deciding which clusters have publishers (senders) and which have consumers (receivers). A publisher cluster sends events; a consumer cluster receives and applies them.
+
+## WanReplicationConfig
+
+`WanReplicationConfig` (`com.hazelcast.config.WanReplicationConfig`) is the root WAN configuration. Give it a name and attach one or more publisher configurations. This name is then referenced from a `MapConfig` or `CacheConfig`.
+
+```java
+import com.hazelcast.config.Config;
+import com.hazelcast.config.WanReplicationConfig;
+import com.hazelcast.config.WanBatchPublisherConfig;
+
+WanBatchPublisherConfig publisher = new WanBatchPublisherConfig()
+        .setClusterName("london")
+        .setTargetEndpoints("10.3.5.1:5701,10.3.5.2:5701")
+        .setBatchSize(500)
+        .setBatchMaxDelayMillis(1000)
+        .setQueueCapacity(10000);
+
+WanReplicationConfig wanConfig = new WanReplicationConfig()
+        .setName("london-replication")
+        .addBatchReplicationPublisherConfig(publisher);
+
+Config config = new Config();
+config.addWanReplicationConfig(wanConfig);
+```
+
+## WanBatchPublisherConfig
+
+`WanBatchPublisherConfig` configures the built-in batching publisher. It sends events in batches to reduce network overhead.
+
+| Property | Default | Description |
+|---|---|---|
+| `clusterName` | `"dev"` | Name of the target cluster. Used for authentication. |
+| `targetEndpoints` | `""` | Comma-separated `host:port` list of target members. |
+| `batchSize` | `500` | Maximum number of events in a single batch. |
+| `batchMaxDelayMillis` | `1000` | Maximum time (ms) to wait before sending a batch even if not full. |
+| `queueCapacity` | `10000` | Maximum number of events to queue before applying `queueFullBehavior`. |
+| `responseTimeoutMillis` | `60000` | Timeout (ms) to wait for acknowledgement from target. |
+| `snapshotEnabled` | `false` | When `true`, only the latest event per key is sent (coalescing). |
+| `acknowledgeType` | `ACK_ON_OPERATION_COMPLETE` | When to consider an event acknowledged by the target. |
+
+### Full XML example
+
+```xml hazelcast.xml
+<wan-replication name="london-replication">
+    <batch-publisher>
+        <cluster-name>london</cluster-name>
+        <target-endpoints>10.3.5.1:5701,10.3.5.2:5701</target-endpoints>
+        <batch-size>500</batch-size>
+        <batch-max-delay-millis>1000</batch-max-delay-millis>
+        <response-timeout-millis>60000</response-timeout-millis>
+        <acknowledge-type>ACK_ON_OPERATION_COMPLETE</acknowledge-type>
+        <queue-capacity>10000</queue-capacity>
+        <queue-full-behavior>DISCARD_AFTER_MUTATION</queue-full-behavior>
+        <snapshot-enabled>false</snapshot-enabled>
+        <initial-publisher-state>REPLICATING</initial-publisher-state>
+    </batch-publisher>
+</wan-replication>
+```
+
+```yaml hazelcast.yaml
+hazelcast:
+  wan-replication:
+    london-replication:
+      batch-publisher:
+        cluster-name: london
+        target-endpoints: 10.3.5.1:5701,10.3.5.2:5701
+        batch-size: 500
+        batch-max-delay-millis: 1000
+        response-timeout-millis: 60000
+        acknowledge-type: ACK_ON_OPERATION_COMPLETE
+        queue-capacity: 10000
+        queue-full-behavior: DISCARD_AFTER_MUTATION
+        snapshot-enabled: false
+        initial-publisher-state: REPLICATING
+```
+
+## Adding WAN replication to a map
+
+Reference the `WanReplicationConfig` by name from a `MapConfig`:
+
+<CodeGroup>
+
+```java Java
+import com.hazelcast.config.MapConfig;
+import com.hazelcast.config.WanReplicationRef;
+
+WanReplicationRef wanRef = new WanReplicationRef()
+        .setName("london-replication")
+        .setMergePolicyClassName("com.hazelcast.spi.merge.PassThroughMergePolicy")
+        .setRepublishingEnabled(false);
+
+MapConfig mapConfig = new MapConfig("orders")
+        .setWanReplicationRef(wanRef);
+
+config.addMapConfig(mapConfig);
+```
+
+```xml XML
+<map name="orders">
+    <wan-replication-ref name="london-replication">
+        <merge-policy-class-name>
+            com.hazelcast.spi.merge.PassThroughMergePolicy
+        </merge-policy-class-name>
+        <republishing-enabled>false</republishing-enabled>
+    </wan-replication-ref>
+</map>
+```
+
+```yaml YAML
+hazelcast:
+  map:
+    orders:
+      wan-replication-ref:
+        name: london-replication
+        merge-policy-class-name: com.hazelcast.spi.merge.PassThroughMergePolicy
+        republishing-enabled: false
+```
+
+</CodeGroup>
+
+`republishing-enabled` controls whether events received over WAN are re-published to other WAN targets. Enable this only in hub-and-spoke topologies where a central cluster should forward events to other spokes.
+
+## Consistency and ordering guarantees
+
+- Events for a given partition key are delivered **in order** to the target cluster.
+- Events from different partition keys may arrive out of order relative to each other.
+- The publisher uses an internal queue. If the queue fills up, the `queueFullBehavior` policy applies:
+  - `DISCARD_AFTER_MUTATION` (default): the mutation completes locally but the WAN event is dropped.
+  - `THROW_EXCEPTION`: the mutation is rejected with an exception.
+  - `THROW_EXCEPTION_ONLY_IF_REPLICATION_ACTIVE`: the mutation is rejected only if WAN replication is active (not paused).
+
+## WAN sync
+
+WAN sync transfers the full data set from the source cluster to the target cluster. Use it to initially populate a new target cluster or to recover from a replication lag.
+
+### Configuring consistency check strategy
+
+```xml hazelcast.xml
+<wan-replication name="london-replication">
+    <batch-publisher>
+        <cluster-name>london</cluster-name>
+        <target-endpoints>10.3.5.1:5701</target-endpoints>
+        <sync>
+            <consistency-check-strategy>MERKLE_TREES</consistency-check-strategy>
+        </sync>
+    </batch-publisher>
+</wan-replication>
+```
+
+Set `consistency-check-strategy` to `MERKLE_TREES` to use Merkle tree-based delta sync (transfers only differing entries). Use `NONE` to skip consistency checking and always do a full sync.
+
+### Triggering WAN sync via Management Center
+
+You can trigger WAN sync from Management Center's WAN Replication panel without any code changes. This is the recommended approach for production use.
+
+### Triggering WAN sync via the REST API
+
+```bash
+# Full sync for the "orders" map to the "london-replication" publisher
+curl -X POST \
+  "http://member-host:5701/hazelcast/rest/wan/sync/map" \
+  -d '{"wanReplicationName":"london-replication","publisherId":"london","mapName":"orders"}'
+```
+
+## Cloud and Kubernetes discovery
+
+Instead of listing `targetEndpoints` statically, you can use cloud discovery for the WAN publisher. `WanBatchPublisherConfig` supports the same discovery mechanisms as the member join configuration: AWS, GCP, Azure, Kubernetes, and Eureka.
+
+```java
+import com.hazelcast.config.KubernetesConfig;
+
+WanBatchPublisherConfig publisher = new WanBatchPublisherConfig()
+        .setClusterName("london");
+
+publisher.getKubernetesConfig()
+         .setEnabled(true)
+         .setProperty("namespace", "hazelcast-london")
+         .setProperty("service-name", "hazelcast-london");
+```

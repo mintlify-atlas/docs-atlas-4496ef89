@@ -1,0 +1,215 @@
+---
+title: "Querying maps with SQL"
+description: "How to expose an IMap as a SQL table using CREATE MAPPING, then run SELECT, aggregation, JOIN, and INSERT queries from Java."
+keywords: ["sql", "imap", "create mapping", "select", "insert", "sink", "join", "aggregation", "SqlStatement", "parameterized queries"]
+---
+
+Hazelcast lets you query distributed IMaps using SQL. Before you run any query, you must create a mapping that tells the SQL engine how the map's keys and values are structured.
+
+## Create a mapping
+
+Use `CREATE MAPPING` to expose an IMap as a SQL table. The statement declares column names, SQL types, and formatting options for keys and values.
+
+```sql
+CREATE MAPPING employees (
+    __key      BIGINT,
+    name       VARCHAR,
+    salary     DECIMAL,
+    department VARCHAR
+)
+TYPE IMap
+OPTIONS (
+    'keyFormat'   = 'bigint',
+    'valueFormat' = 'json-flat'
+)
+```
+
+- `__key` refers to the map entry key.
+- The remaining columns map to fields inside the value.
+- `keyFormat` and `valueFormat` tell the engine how to serialize/deserialize keys and values (`bigint`, `varchar`, `json-flat`, `java`, `portable`, and others are supported).
+
+You can execute DDL statements through `SqlService` just like any other query:
+
+```java
+hz.getSql().execute(
+    "CREATE MAPPING IF NOT EXISTS employees (" +
+    "    __key      BIGINT," +
+    "    name       VARCHAR," +
+    "    salary     DECIMAL," +
+    "    department VARCHAR" +
+    ") TYPE IMap " +
+    "OPTIONS ('keyFormat'='bigint', 'valueFormat'='json-flat')"
+);
+```
+
+## SELECT queries
+
+### Basic select
+
+```sql
+SELECT name, salary FROM employees
+```
+
+```java
+try (SqlResult result = hz.getSql().execute(
+        "SELECT name, salary FROM employees")) {
+    for (SqlRow row : result) {
+        String name   = row.getObject("name");
+        Object salary = row.getObject("salary");
+        System.out.println(name + " earns " + salary);
+    }
+}
+```
+
+### Filtering with WHERE
+
+```sql
+SELECT name, salary
+FROM employees
+WHERE department = 'Engineering'
+```
+
+### Sorting and limiting results
+
+```sql
+SELECT name, salary
+FROM employees
+WHERE department = 'Engineering'
+ORDER BY salary DESC
+LIMIT 10
+```
+
+### Aggregation
+
+```sql
+SELECT department,
+       COUNT(*) AS headcount,
+       SUM(salary) AS total_salary,
+       AVG(salary) AS avg_salary
+FROM employees
+GROUP BY department
+```
+
+```java
+try (SqlResult result = hz.getSql().execute(
+        "SELECT department, COUNT(*), AVG(salary) FROM employees GROUP BY department")) {
+    for (SqlRow row : result) {
+        String dept     = row.getObject("department");
+        Long   count    = row.getObject(1);
+        Object avgSal   = row.getObject(2);
+        System.out.printf("%s: %d employees, avg salary %s%n", dept, count, avgSal);
+    }
+}
+```
+
+### JOIN between two maps
+
+You can join two mapped IMaps in a single query. First create a mapping for each map, then join them by a common field:
+
+```sql
+CREATE MAPPING departments (
+    __key BIGINT,
+    dept_name VARCHAR,
+    location  VARCHAR
+)
+TYPE IMap
+OPTIONS ('keyFormat'='bigint', 'valueFormat'='json-flat')
+```
+
+```sql
+SELECT e.name, e.salary, d.location
+FROM employees e
+JOIN departments d ON e.department = d.dept_name
+WHERE d.location = 'London'
+```
+
+## Writing data
+
+### INSERT INTO
+
+Use `INSERT INTO` to add or overwrite individual entries:
+
+```sql
+INSERT INTO employees (__key, name, salary, department)
+VALUES (101, 'Alice', 95000.00, 'Engineering')
+```
+
+```java
+hz.getSql().execute(
+    "INSERT INTO employees (__key, name, salary, department) VALUES (?, ?, ?, ?)",
+    101L, "Alice", new BigDecimal("95000.00"), "Engineering"
+);
+```
+
+### SINK INTO
+
+`SINK INTO` is the Hazelcast-specific upsert variant. It inserts new entries or replaces existing ones with matching keys:
+
+```sql
+SINK INTO employees (__key, name, salary, department)
+VALUES (101, 'Alice', 98000.00, 'Engineering')
+```
+
+Use `SINK INTO` when you want idempotent writes that update existing entries rather than failing on key conflicts.
+
+<Warning>
+`INSERT` and `SINK` statements are not atomic. A failure mid-execution may result in partial writes.
+</Warning>
+
+## Parameterized queries
+
+Use `?` placeholders in your SQL string and pass parameter values either directly to `execute()` or through a `SqlStatement`.
+
+### Inline parameters
+
+```java
+try (SqlResult result = hz.getSql().execute(
+        "SELECT name, salary FROM employees WHERE department = ? AND salary > ?",
+        "Engineering", new BigDecimal("80000"))) {
+    for (SqlRow row : result) {
+        System.out.println(row.getObject("name"));
+    }
+}
+```
+
+### SqlStatement with options
+
+`SqlStatement` gives you finer control over execution: you can set a timeout, adjust the cursor buffer size, and declare the expected result type.
+
+```java
+import com.hazelcast.sql.SqlStatement;
+import com.hazelcast.sql.SqlExpectedResultType;
+
+SqlStatement statement = new SqlStatement(
+        "SELECT name, salary FROM employees WHERE department = ?")
+    .addParameter("Engineering")
+    .setTimeoutMillis(5_000)                          // cancel after 5 s
+    .setCursorBufferSize(1024)                        // rows in internal buffer
+    .setExpectedResultType(SqlExpectedResultType.ROWS); // fail if DML is executed
+
+try (SqlResult result = hz.getSql().execute(statement)) {
+    for (SqlRow row : result) {
+        System.out.println(row.getObject("name"));
+    }
+}
+```
+
+#### SqlExpectedResultType values
+
+| Value          | Behaviour                                                        |
+| -------------- | ---------------------------------------------------------------- |
+| `ANY`          | Accept either a row set or an update count (default).            |
+| `ROWS`         | Require a row set; throw if the statement produces an update count. |
+| `UPDATE_COUNT` | Require an update count; throw if the statement produces rows.   |
+
+#### Timeout values
+
+| Constant                      | Meaning                                              |
+| ----------------------------- | ---------------------------------------------------- |
+| `SqlStatement.TIMEOUT_NOT_SET` (`-1`) | Use the value from `SqlConfig.getStatementTimeoutMillis()`. |
+| `SqlStatement.TIMEOUT_DISABLED` (`0`) | No timeout — the query runs indefinitely.   |
+| Any positive value            | Cancel the query after this many milliseconds.       |
+
+<Tip>
+The default cursor buffer size is 4096 rows. Increase it for large result sets to reduce round trips; decrease it to reduce memory usage.
+</Tip>

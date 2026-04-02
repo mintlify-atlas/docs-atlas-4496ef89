@@ -1,97 +1,98 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "Hazelcast Documentation"
+description: "The unified real-time data platform for stream processing, in-memory data storage, and distributed computing."
 ---
 
-## Setting up
+Hazelcast is a unified real-time data platform that combines a high-performance in-memory data store with a built-in stream processing engine. Use it to process streaming data, enrich it with context, and take instant action — before data ever reaches a database.
 
-Get your documentation site up and running in minutes.
+Trusted by companies like HSBC, JPMorgan Chase, Lowe's, and Volvo, Hazelcast delivers microsecond latency for key-value lookups and sub-10ms latency at millions of events per second for streaming queries.
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Get a Hazelcast cluster running and execute your first queries in minutes.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="IMap: Distributed Map" icon="database" href="/data-structures/imap">
+    The core data structure — a distributed, queryable, event-driven key-value store.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Stream Processing" icon="bolt" href="/stream-processing/overview">
+    Build real-time and batch data pipelines with the built-in Jet engine.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="SQL Queries" icon="magnifying-glass" href="/sql/overview">
+    Run distributed SQL over maps, Kafka topics, and file sources.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Get started
 
-Everything you need to create world-class documentation.
+<Steps>
+  <Step title="Add the Maven dependency">
+    Add Hazelcast to your Java project using Maven or Gradle.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+    ```xml pom.xml
+    <dependency>
+      <groupId>com.hazelcast</groupId>
+      <artifactId>hazelcast</artifactId>
+      <version>5.5.0</version>
+    </dependency>
+    ```
+  </Step>
+  <Step title="Start a Hazelcast instance">
+    Create a local Hazelcast node — it's also a fully functional cluster member.
 
-## Need inspiration?
+    ```java
+    import com.hazelcast.core.Hazelcast;
+    import com.hazelcast.core.HazelcastInstance;
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+    HazelcastInstance hz = Hazelcast.newHazelcastInstance();
+    ```
+  </Step>
+  <Step title="Store and query data">
+    Use `IMap` to put, get, and query distributed data instantly.
+
+    ```java
+    import com.hazelcast.map.IMap;
+
+    IMap<String, String> map = hz.getMap("my-map");
+    map.put("key1", "value1");
+    String value = map.get("key1");
+    ```
+  </Step>
+  <Step title="Run a SQL query">
+    Use the SQL service for expressive distributed queries.
+
+    ```java
+    try (SqlResult result = hz.getSql().execute("SELECT * FROM \"my-map\"")) {
+        for (SqlRow row : result) {
+            System.out.println(row.getObject(0));
+        }
+    }
+    ```
+  </Step>
+</Steps>
+
+## Explore by use case
+
+<CardGroup cols={2}>
+  <Card title="Core Concepts" icon="book" href="/concepts/distributed-data-structures">
+    Understand partitioning, replication, and cluster topology before building.
+  </Card>
+  <Card title="CP Subsystem" icon="shield-check" href="/data-structures/cp-subsystem">
+    Strongly consistent primitives — atomic counters, semaphores, and distributed locks.
+  </Card>
+  <Card title="Sources & Sinks" icon="arrows-left-right" href="/stream-processing/sources-and-sinks">
+    Connect to Kafka, JDBC, S3, JMS, files, and more for pipeline I/O.
+  </Card>
+  <Card title="WAN Replication" icon="globe" href="/operations/wan-replication">
+    Replicate data across data centers and geographic regions.
+  </Card>
+  <Card title="Configuration" icon="gear" href="/operations/configuration">
+    Configure Hazelcast via XML, YAML, or the Java Config API.
+  </Card>
+  <Card title="Java API Reference" icon="code" href="/api/hazelcast-instance">
+    Complete reference for all public Java APIs.
+  </Card>
+</CardGroup>
+
+<Note>
+  Hazelcast requires **JDK 17 or later**. The Jet engine must be enabled (default) for SQL and stream processing features.
+</Note>

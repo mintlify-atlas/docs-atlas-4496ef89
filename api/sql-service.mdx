@@ -1,0 +1,269 @@
+---
+title: "SqlService API"
+description: "Reference for Hazelcast's distributed SQL engine. Covers SqlService, SqlStatement, SqlResult, SqlRow, and SqlColumnType."
+---
+
+`SqlService` lets you run distributed SQL queries over IMaps, Kafka topics, files, and other connectors. Queries are compiled by Apache Calcite, converted to a DAG, and executed as a Jet job across the cluster.
+
+<Note>
+Before querying any distributed object you must create a **mapping** using the `CREATE MAPPING` SQL command. See the Hazelcast reference manual for mapping syntax.
+</Note>
+
+Obtain `SqlService` from `HazelcastInstance`:
+
+```java
+SqlService sql = hz.getSql();
+```
+
+---
+
+## SqlService
+
+### execute
+
+```java
+SqlResult execute(String sql, Object... arguments)
+```
+
+Executes the given SQL string, optionally substituting `?` parameter placeholders with the supplied arguments. Returns an `SqlResult` that you must close when done.
+
+```java
+try (SqlResult result = sql.execute(
+        "SELECT orderId, status FROM orders WHERE customerId = ?", "C-42")) {
+    for (SqlRow row : result) {
+        System.out.println(row.getObject("orderId") + ": " + row.getObject("status"));
+    }
+}
+```
+
+---
+
+```java
+SqlResult execute(SqlStatement statement)
+```
+
+Executes a pre-built `SqlStatement`. Use this form when you need fine-grained control over timeout, cursor buffer size, or expected result type.
+
+---
+
+### executeUpdate
+
+```java
+long executeUpdate(String sql, Object... arguments)
+```
+
+Convenience method for non-`SELECT` statements (INSERT, UPDATE, DELETE, CREATE MAPPING, etc.). Closes the result automatically and returns the update count.
+
+<Note>
+As of Hazelcast 5.6, DML statements always return `0` from `updateCount()`. This method is provided for forward-compatibility; rely on it for DDL and DML success/failure, not for row counts.
+</Note>
+
+```java
+sql.executeUpdate("CREATE MAPPING orders TYPE IMap OPTIONS ('keyFormat'='varchar', 'valueFormat'='json')");
+
+long count = sql.executeUpdate(
+    "INSERT INTO orders (__key, this) VALUES (?, ?)",
+    "ORD-005", "{\"item\":\"Widget\",\"quantity\":3}");
+```
+
+---
+
+## SqlStatement
+
+`SqlStatement` is the mutable definition of an SQL execution. Build it when you need to configure timeout, buffer size, or expected result type.
+
+```java
+SqlStatement(String sql)
+```
+
+### Parameter binding
+
+```java
+SqlStatement addParameter(Object value)       // appends one parameter
+SqlStatement setParameters(List<Object> list) // replaces all parameters
+SqlStatement clearParameters()                // removes all parameters
+```
+
+```java
+SqlStatement stmt = new SqlStatement("SELECT * FROM orders WHERE status = ? AND quantity > ?")
+    .addParameter("PENDING")
+    .addParameter(5);
+```
+
+### Timeout
+
+```java
+SqlStatement setTimeoutMillis(long timeout)
+```
+
+Sets the execution timeout. Use `0` for no timeout, `-1` (the default, `SqlStatement.TIMEOUT_NOT_SET`) to inherit the cluster-wide `SqlConfig.statementTimeoutMillis`.
+
+```java
+stmt.setTimeoutMillis(5_000); // cancel query after 5 seconds
+```
+
+### Cursor buffer size
+
+```java
+SqlStatement setCursorBufferSize(int cursorBufferSize)
+```
+
+Controls how many rows are buffered on the server before backpressure kicks in. Default is `4096`. Larger values can increase throughput for large result sets at the cost of more memory.
+
+```java
+stmt.setCursorBufferSize(8192);
+```
+
+### Expected result type
+
+```java
+SqlStatement setExpectedResultType(SqlExpectedResultType type)
+```
+
+Validates the result type before execution. Values:
+
+| Constant | Description |
+|---|---|
+| `ANY` | Accepts both row sets and update counts (default) |
+| `ROWS` | Requires the statement to return rows; throws if it returns an update count |
+| `UPDATE_COUNT` | Requires the statement to return an update count |
+
+```java
+stmt.setExpectedResultType(SqlExpectedResultType.ROWS);
+```
+
+### Schema
+
+```java
+SqlStatement setSchema(String schema)
+```
+
+Sets the schema used to resolve non-qualified object names. The engine searches this schema first, then falls back to `partitioned` and `public`. The name is case-sensitive.
+
+---
+
+## SqlResult
+
+`SqlResult` is returned by `SqlService.execute`. It implements `AutoCloseable` and `Iterable<SqlRow>`.
+
+```java
+try (SqlResult result = sql.execute("SELECT * FROM orders")) {
+    // use result here
+}
+```
+
+### Methods
+
+<ResponseField name="isRowSet()" type="boolean">
+  Returns `true` when the result contains rows (i.e., a `SELECT` query). Returns `false` for DML and DDL statements where only an update count is available.
+</ResponseField>
+
+<ResponseField name="iterator()" type="Iterator&lt;SqlRow&gt;">
+  Returns an iterator over the result rows. Can only be called once per `SqlResult`. Throws `IllegalStateException` if the result is not a row set.
+</ResponseField>
+
+<ResponseField name="stream()" type="Stream&lt;SqlRow&gt;">
+  Returns a `Stream<SqlRow>`. Backed by `iterator()`, so it can also only be used once. Available since Hazelcast 5.4.
+</ResponseField>
+
+<ResponseField name="getRowMetadata()" type="SqlRowMetadata">
+  Returns metadata about the result columns (names and types). Throws `IllegalStateException` if the result is not a row set.
+</ResponseField>
+
+<ResponseField name="updateCount()" type="long">
+  Returns `-1` for row-set results. Returns `0` for DML statements (the row count is no longer tracked as of 5.6). Deprecated as of 5.6.
+</ResponseField>
+
+<ResponseField name="close()" type="void">
+  Releases resources. If the query is still executing on the cluster, it is cancelled. For update-count results this is a no-op. Always call `close`, or use try-with-resources.
+</ResponseField>
+
+---
+
+## SqlRow
+
+Represents a single row in an `SqlResult`.
+
+```java
+<T> T getObject(int columnIndex)
+<T> T getObject(String columnName)
+```
+
+Column indexes are zero-based.
+
+```java
+try (SqlResult result = sql.execute("SELECT orderId, quantity FROM orders")) {
+    for (SqlRow row : result) {
+        String id  = row.getObject("orderId");   // by name
+        int    qty = row.getObject(1);            // by index (0-based)
+    }
+}
+```
+
+---
+
+## SqlColumnType
+
+The `SqlRowMetadata.getColumn(int).getType()` method returns a `SqlColumnType` enum value describing the SQL type of a column.
+
+| Value | Java equivalent |
+|---|---|
+| `VARCHAR` | `String` |
+| `BOOLEAN` | `Boolean` |
+| `TINYINT` | `Byte` |
+| `SMALLINT` | `Short` |
+| `INTEGER` | `Integer` |
+| `BIGINT` | `Long` |
+| `DECIMAL` | `BigDecimal` |
+| `REAL` | `Float` |
+| `DOUBLE` | `Double` |
+| `DATE` | `LocalDate` |
+| `TIME` | `LocalTime` |
+| `TIMESTAMP` | `LocalDateTime` |
+| `TIMESTAMP_WITH_TIME_ZONE` | `OffsetDateTime` |
+| `OBJECT` | Any Java object |
+| `NULL` | `null` |
+| `JSON` | `HazelcastJsonValue` |
+| `ROW` | `SqlRow` |
+
+---
+
+## Complete example
+
+```java
+import com.hazelcast.sql.SqlExpectedResultType;
+import com.hazelcast.sql.SqlResult;
+import com.hazelcast.sql.SqlRow;
+import com.hazelcast.sql.SqlRowMetadata;
+import com.hazelcast.sql.SqlService;
+import com.hazelcast.sql.SqlStatement;
+
+SqlService sql = hz.getSql();
+
+// DDL — create a mapping for an existing IMap
+sql.executeUpdate(
+    "CREATE MAPPING IF NOT EXISTS orders (" +
+    "  __key VARCHAR," +
+    "  item VARCHAR," +
+    "  quantity INT" +
+    ") TYPE IMap OPTIONS ('keyFormat'='varchar','valueFormat'='json')"
+);
+
+// Parameterised SELECT using SqlStatement
+SqlStatement stmt = new SqlStatement("SELECT __key, item, quantity FROM orders WHERE quantity > ?")
+    .addParameter(3)
+    .setTimeoutMillis(10_000)
+    .setExpectedResultType(SqlExpectedResultType.ROWS);
+
+try (SqlResult result = sql.execute(stmt)) {
+    SqlRowMetadata meta = result.getRowMetadata();
+    System.out.println("Columns: " + meta.getColumnCount());
+
+    for (SqlRow row : result) {
+        System.out.printf("%-12s %-20s %d%n",
+            row.getObject("__key"),
+            row.getObject("item"),
+            (int) row.getObject("quantity"));
+    }
+}
+```

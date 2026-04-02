@@ -1,0 +1,473 @@
+---
+title: "Sources and sinks"
+description: "Reference for all built-in Jet connectors: IMap, IList, IMap journal, Kafka, files, JDBC, JMS, TCP socket, Observable, and logger."
+---
+
+Jet provides a library of connectors in the `Sources` and `Sinks` utility classes. Pass a source to `Pipeline.readFrom()` to begin a pipeline, and pass a sink to `stage.writeTo()` to terminate it.
+
+<Tabs>
+  <Tab title="Sources">
+
+## Sources
+
+### IMap — batch
+
+`Sources.map()` reads all entries from a local `IMap` as a batch. It leverages data locality — each processor reads only the partitions stored on the member where it runs.
+
+```java
+// Read by map name
+BatchSource<Map.Entry<String, Integer>> source = Sources.map("my-map");
+
+// Read with a predicate and projection pushed down to the source
+BatchSource<String> filtered = Sources.map(
+        "my-map",
+        Predicates.greaterThan("value", 0),
+        Projections.singleAttribute("name"));
+
+// Read from a remote cluster
+BatchSource<Map.Entry<String, Integer>> remote =
+        Sources.remoteMap("my-map", clientConfig);
+```
+
+Signature:
+```java
+public static <K, V> BatchSource<Entry<K, V>> map(@Nonnull String mapName)
+
+public static <T, K, V> BatchSource<T> map(
+        @Nonnull String mapName,
+        @Nonnull Predicate<K, V> predicate,
+        @Nonnull Projection<? super Entry<K, V>, ? extends T> projection)
+
+public static <K, V> BatchSource<Entry<K, V>> remoteMap(
+        @Nonnull String mapName,
+        @Nonnull ClientConfig clientConfig)
+```
+
+<Note>
+The IMap batch source does not save state to snapshots. If the job restarts, it re-emits all entries.
+</Note>
+
+---
+
+### IMap journal — streaming
+
+`Sources.mapJournal()` streams mutation events from the IMap event journal. The journal must be enabled in the Hazelcast configuration before you can use this source.
+
+```java
+StreamSource<Map.Entry<String, Order>> source = Sources.mapJournal(
+        "orders",
+        JournalInitialPosition.START_FROM_CURRENT);
+```
+
+The source saves journal offsets to snapshots and resumes from them after a restart, providing an exactly-once guarantee (unless the journal has overflowed).
+
+Signature:
+```java
+public static <K, V> StreamSource<Entry<K, V>> mapJournal(
+        @Nonnull String mapName,
+        @Nonnull JournalInitialPosition initialPos)
+
+public static <T, K, V> StreamSource<T> mapJournal(
+        @Nonnull String mapName,
+        @Nonnull JournalInitialPosition initialPos,
+        @Nonnull FunctionEx<? super EventJournalMapEvent<K, V>, ? extends T> projectionFn,
+        @Nonnull PredicateEx<? super EventJournalMapEvent<K, V>> predicateFn)
+```
+
+`JournalInitialPosition` options:
+- `START_FROM_CURRENT` — read only new events
+- `START_FROM_OLDEST` — replay all events currently in the journal
+
+---
+
+### Kafka — streaming
+
+`KafkaSources.kafka()` (from the `hazelcast-jet-kafka` module) reads from one or more Kafka topics. It saves consumer offsets to Jet snapshots for exactly-once processing.
+
+```java
+Properties props = new Properties();
+props.setProperty("bootstrap.servers", "localhost:9092");
+props.setProperty("key.deserializer", StringDeserializer.class.getName());
+props.setProperty("value.deserializer", StringDeserializer.class.getName());
+
+StreamSource<Map.Entry<String, String>> source =
+        KafkaSources.kafka(props, "clicks", "purchases");
+```
+
+<Info>
+Add the `hazelcast-jet-kafka` dependency to your project to use the Kafka connector. It is not bundled in the core distribution.
+</Info>
+
+---
+
+### Files — batch
+
+`Sources.files()` reads all lines from every file in a directory as a batch.
+
+```java
+BatchSource<String> source = Sources.files("/data/logs");
+```
+
+Use `Sources.filesBuilder()` for more control: choose a glob pattern, a charset, or whether the file system is shared across cluster members.
+
+```java
+BatchSource<String> source = Sources.filesBuilder("/data/logs")
+        .glob("*.log")
+        .charset(StandardCharsets.UTF_8)
+        .sharedFileSystem(true)
+        .build((fileName, line) -> line);
+```
+
+Signature:
+```java
+public static BatchSource<String> files(@Nonnull String directory)
+
+public static FileSourceBuilder filesBuilder(@Nonnull String directory)
+```
+
+---
+
+### File watcher — streaming
+
+`Sources.fileWatcher()` watches a directory and emits lines as they are appended to files.
+
+```java
+StreamSource<String> source = Sources.fileWatcher("/var/log/app");
+```
+
+Signature:
+```java
+public static StreamSource<String> fileWatcher(@Nonnull String watchedDirectory)
+```
+
+---
+
+### JDBC — batch
+
+`Sources.jdbc()` runs a SQL query against a JDBC data source and emits one item per result-set row.
+
+```java
+BatchSource<Person> source = Sources.jdbc(
+        "jdbc:postgresql://localhost:5432/mydb",
+        "SELECT id, name FROM person",
+        rs -> new Person(rs.getInt(1), rs.getString(2)));
+```
+
+For parallel reads, use the three-argument overload that supplies a factory, a result-set function receiving the total parallelism and the processor index, and an output-mapping function:
+
+```java
+BatchSource<Person> source = Sources.jdbc(
+        () -> DriverManager.getConnection(DB_URL),
+        (con, parallelism, index) -> {
+            PreparedStatement stmt =
+                    con.prepareStatement("SELECT * FROM person WHERE MOD(id, ?) = ?");
+            stmt.setInt(1, parallelism);
+            stmt.setInt(2, index);
+            return stmt.executeQuery();
+        },
+        rs -> new Person(rs.getInt(1), rs.getString(2)));
+```
+
+Signature:
+```java
+public static <T> BatchSource<T> jdbc(
+        @Nonnull String connectionURL,
+        @Nonnull String query,
+        @Nonnull FunctionEx<? super ResultSet, ? extends T> createOutputFn)
+
+public static <T> BatchSource<T> jdbc(
+        @Nonnull SupplierEx<? extends Connection> newConnectionFn,
+        @Nonnull ToResultSetFunction resultSetFn,
+        @Nonnull FunctionEx<? super ResultSet, ? extends T> createOutputFn)
+```
+
+---
+
+### JMS queue — streaming
+
+`Sources.jmsQueue()` consumes messages from a JMS queue.
+
+```java
+StreamSource<Message> source = Sources.jmsQueue(
+        "orders",
+        () -> new ActiveMQConnectionFactory("tcp://localhost:61616"));
+```
+
+Signature:
+```java
+public static StreamSource<Message> jmsQueue(
+        @Nonnull String name,
+        @Nonnull SupplierEx<? extends ConnectionFactory> factorySupplier)
+```
+
+---
+
+### JMS topic — streaming
+
+`Sources.jmsTopic()` subscribes to a JMS topic. By default it creates a non-durable, non-shared consumer on a single cluster member.
+
+```java
+StreamSource<Message> source = Sources.jmsTopic(
+        "price-updates",
+        () -> new ActiveMQConnectionFactory("tcp://localhost:61616"));
+```
+
+Signature:
+```java
+public static StreamSource<Message> jmsTopic(
+        @Nonnull String name,
+        @Nonnull SupplierEx<? extends ConnectionFactory> factorySupplier)
+```
+
+---
+
+### TCP socket — streaming
+
+`Sources.socket()` connects to a TCP server and emits lines of text it receives.
+
+```java
+StreamSource<String> source = Sources.socket("localhost", 5701);
+```
+
+Signature:
+```java
+public static StreamSource<String> socket(@Nonnull String host, int port)
+
+public static StreamSource<String> socket(
+        @Nonnull String host, int port, @Nonnull Charset charset)
+```
+
+Each parallel processor opens its own connection. The source completes when the server closes the socket and never attempts to reconnect.
+
+---
+
+### IList — batch
+
+`Sources.list()` reads all elements from a Hazelcast `IList`. All elements are emitted on the single member that owns the list.
+
+```java
+BatchSource<String> source = Sources.list("my-list");
+```
+
+Signature:
+```java
+public static <T> BatchSource<T> list(@Nonnull String listName)
+
+public static <T> BatchSource<T> list(@Nonnull IList<? extends T> list)
+```
+
+  </Tab>
+  <Tab title="Sinks">
+
+## Sinks
+
+### IMap — write
+
+`Sinks.map()` puts `Map.Entry` items into a Hazelcast `IMap`. Because a `put` with the same key overwrites the previous value, this sink is idempotent and provides an exactly-once guarantee.
+
+```java
+Sink<Map.Entry<String, Integer>> sink = Sinks.map("results");
+
+// Extract key and value from a non-Entry type
+Sink<Order> sink = Sinks.map(
+        "results",
+        Order::getId,
+        Order::getTotal);
+
+// Write to a remote cluster
+Sink<Map.Entry<String, Integer>> remoteSink =
+        Sinks.remoteMap("results", clientConfig);
+```
+
+Signature:
+```java
+public static <K, V> Sink<Entry<K, V>> map(@Nonnull String mapName)
+
+public static <T, K, V> Sink<T> map(
+        @Nonnull String mapName,
+        @Nonnull FunctionEx<? super T, ? extends K> toKeyFn,
+        @Nonnull FunctionEx<? super T, ? extends V> toValueFn)
+
+public static <K, V> Sink<Entry<K, V>> remoteMap(
+        @Nonnull String mapName,
+        @Nonnull ClientConfig clientConfig)
+```
+
+---
+
+### Kafka — write
+
+`KafkaSinks.kafka()` (from the `hazelcast-jet-kafka` module) writes items to a Kafka topic. In exactly-once mode, it uses XA transactions.
+
+```java
+Properties props = new Properties();
+props.setProperty("bootstrap.servers", "localhost:9092");
+props.setProperty("key.serializer", StringSerializer.class.getName());
+props.setProperty("value.serializer", StringSerializer.class.getName());
+
+Sink<Map.Entry<String, String>> sink =
+        KafkaSinks.kafka(props, "output-topic");
+```
+
+---
+
+### Files — write
+
+`Sinks.files()` writes each item as a line in a file inside the specified directory. Each processor writes to its own file.
+
+```java
+Sink<String> sink = Sinks.files("/data/output");
+```
+
+Use `Sinks.filesBuilder()` for options such as date-based rolling, maximum file size, and exactly-once mode.
+
+```java
+Sink<String> sink = Sinks.<String>filesBuilder("/data/output")
+        .rollByDate("yyyy-MM-dd")
+        .build();
+```
+
+Signature:
+```java
+public static <T> Sink<T> files(@Nonnull String directoryName)
+
+public static <T> FileSinkBuilder<T> filesBuilder(@Nonnull String directoryName)
+```
+
+In exactly-once mode the sink writes to temporary files and renames them atomically when a snapshot is committed.
+
+---
+
+### JDBC — write
+
+`Sinks.jdbc()` executes a parameterised SQL statement for each item.
+
+```java
+Sink<Map.Entry<String, Integer>> sink = Sinks.jdbc(
+        "INSERT INTO results (key, value) VALUES (?, ?)",
+        "jdbc:postgresql://localhost:5432/mydb",
+        (stmt, entry) -> {
+            stmt.setString(1, entry.getKey());
+            stmt.setInt(2, entry.getValue());
+        });
+```
+
+Signature:
+```java
+public static <T> Sink<T> jdbc(
+        @Nonnull String updateQuery,
+        @Nonnull String jdbcUrl,
+        @Nonnull BiConsumerEx<PreparedStatement, T> bindFn)
+
+public static <T> Sink<T> jdbc(
+        @Nonnull String updateQuery,
+        @Nonnull SupplierEx<? extends CommonDataSource> dataSourceSupplier,
+        @Nonnull BiConsumerEx<PreparedStatement, T> bindFn)
+```
+
+In exactly-once mode the sink uses XA transactions. Use `Sinks.jdbcBuilder().exactlyOnce(false)` to opt out if your driver does not support XA.
+
+---
+
+### JMS queue — write
+
+```java
+Sink<String> sink = Sinks.jmsQueue(
+        "output-queue",
+        () -> new ActiveMQConnectionFactory("tcp://localhost:61616"));
+```
+
+Signature:
+```java
+public static <T> Sink<T> jmsQueue(
+        @Nonnull String queueName,
+        @Nonnull SupplierEx<ConnectionFactory> factorySupplier)
+```
+
+---
+
+### JMS topic — write
+
+```java
+Sink<String> sink = Sinks.jmsTopic(
+        "price-updates",
+        () -> new ActiveMQConnectionFactory("tcp://localhost:61616"));
+```
+
+Signature:
+```java
+public static <T> Sink<T> jmsTopic(
+        @Nonnull String topicName,
+        @Nonnull SupplierEx<ConnectionFactory> factorySupplier)
+```
+
+---
+
+### IList — write
+
+`Sinks.list()` appends each item to a Hazelcast `IList`. This sink does not save state to snapshots, so items may be duplicated after a restart (at-least-once).
+
+```java
+Sink<String> sink = Sinks.list("output-list");
+```
+
+Signature:
+```java
+public static <T> Sink<T> list(@Nonnull String listName)
+
+public static <T> Sink<T> list(@Nonnull IList<? super T> list)
+```
+
+---
+
+### Logger
+
+`Sinks.logger()` logs each item at INFO level using the Java logging framework. Primarily useful during development.
+
+```java
+Sink<String> sink = Sinks.logger();
+
+// Custom string representation
+Sink<Order> sink = Sinks.logger(order -> "Order " + order.getId() + ": " + order.getTotal());
+```
+
+Signature:
+```java
+public static <T> Sink<T> logger()
+
+public static <T> Sink<T> logger(@Nonnull FunctionEx<? super T, String> toStringFn)
+```
+
+---
+
+### Observable — stream results to client
+
+`Sinks.observable()` publishes items to a named `Observable` that a client application can subscribe to. This is useful for streaming query results back to the caller.
+
+```java
+Observable<Integer> observable = hz.getJet().newObservable();
+CompletableFuture<List<Integer>> resultsFuture =
+        observable.toFuture(stream -> stream.collect(Collectors.toList()));
+
+pipeline.readFrom(Sources.list("numbers"))
+        .map(n -> (Integer) n * 2)
+        .writeTo(Sinks.observable(observable));
+
+hz.getJet().newJob(pipeline).join();
+List<Integer> results = resultsFuture.get();
+observable.destroy();
+```
+
+Signature:
+```java
+public static <T> Sink<T> observable(String name)
+
+public static <T> Sink<T> observable(Observable<? super T> observable)
+```
+
+<Warning>
+Destroy the `Observable` after use to release the backing `Ringbuffer` from the cluster.
+</Warning>
+
+  </Tab>
+</Tabs>

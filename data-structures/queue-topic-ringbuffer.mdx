@@ -1,0 +1,265 @@
+---
+title: "Queue, Topic, and Ringbuffer"
+description: "Hazelcast's messaging primitives: IQueue for blocking distributed queues, ITopic/IReliableTopic for pub-sub messaging, and Ringbuffer for bounded circular event streams."
+---
+
+Hazelcast provides three distributed messaging primitives. Use `IQueue` when you need exactly-once consumption by a single consumer, `ITopic`/`IReliableTopic` for broadcast pub-sub, and `Ringbuffer` for replayable, bounded event streams.
+
+<Tabs>
+  <Tab title="IQueue">
+
+## IQueue
+
+`IQueue` is a distributed blocking queue backed by a single partition (not partitioned across the cluster). It implements `java.util.concurrent.BlockingQueue`.
+
+<Warning>
+`IQueue` stores all data on a single member (plus its backup). It will not scale horizontally by adding more cluster members. For high-throughput messaging, consider `Ringbuffer` or `ITopic`.
+</Warning>
+
+### Getting a queue
+
+```java
+HazelcastInstance hz = Hazelcast.newHazelcastInstance();
+IQueue<String> taskQueue = hz.getQueue("tasks");
+```
+
+### Producing and consuming
+
+```java
+// Offer — non-blocking, returns false if queue is full
+boolean added = taskQueue.offer("task-1");
+
+// Offer with timeout — blocks up to the given duration
+taskQueue.offer("task-2", 5, TimeUnit.SECONDS);
+
+// Add — throws IllegalStateException if queue is full
+taskQueue.add("task-3");
+
+// Poll — non-blocking, returns null if empty
+String task = taskQueue.poll();
+
+// Poll with timeout — blocks until an item appears or timeout elapses
+String task = taskQueue.poll(10, TimeUnit.SECONDS);
+
+// Take — blocks indefinitely until an item is available
+String task = taskQueue.take();
+
+// Peek — returns head without removing it; null if empty
+String head = taskQueue.peek();
+
+// Size
+int pending = taskQueue.size();
+```
+
+### Bounded queue
+
+Set a maximum size to prevent unbounded growth:
+
+```xml
+<queue name="tasks">
+    <max-size>10000</max-size>
+    <backup-count>1</backup-count>
+</queue>
+```
+
+### Use cases
+
+Use `IQueue` for:
+
+1. Background job queues where tasks are processed by one consumer
+2. Work distribution between a fixed pool of workers (`take()` in each worker thread)
+3. Request buffering between services
+
+  </Tab>
+  <Tab title="ITopic / IReliableTopic">
+
+## ITopic and IReliableTopic
+
+`ITopic` implements cluster-wide publish-subscribe messaging. Any member or client can publish messages, and all registered listeners on any member receive every message in publication order.
+
+### Getting a topic
+
+```java
+HazelcastInstance hz = Hazelcast.newHazelcastInstance();
+
+// Standard topic — uses the shared eventing system
+ITopic<String> events = hz.getTopic("events");
+
+// Reliable topic — backed by a Ringbuffer, messages are persisted
+ITopic<String> reliableEvents = hz.getReliableTopic("reliable-events");
+```
+
+### Publishing messages
+
+```java
+// Synchronous publish to all subscribers
+events.publish("user.login:alice");
+
+// Async publish — returns CompletionStage
+events.publishAsync("user.login:bob")
+      .thenRun(() -> System.out.println("Published"));
+
+// Publish a batch
+events.publishAll(List.of("event1", "event2", "event3"));
+```
+
+### Subscribing
+
+```java
+UUID listenerId = events.addMessageListener(message -> {
+    System.out.println("Received: " + message.getMessageObject()
+        + " at " + message.getPublishTime()
+        + " from " + message.getPublishingMember());
+});
+
+// Unsubscribe
+events.removeMessageListener(listenerId);
+```
+
+### Reliable topic
+
+`IReliableTopic` is backed by a `Ringbuffer` and provides stronger guarantees than the standard topic:
+
+- Messages are stored in the ringbuffer and are **replicated**, so they survive single-node failures.
+- Slow subscribers can catch up by replaying from their last known sequence.
+- Use `ReliableMessageListener` for fine-grained control over replay and failure handling.
+
+```xml
+<reliable-topic name="reliable-events">
+    <read-batch-size>10</read-batch-size>
+    <topic-overload-policy>BLOCK</topic-overload-policy>
+</reliable-topic>
+
+<ringbuffer name="reliable-events">
+    <capacity>100000</capacity>
+    <time-to-live-seconds>300</time-to-live-seconds>
+    <backup-count>1</backup-count>
+</ringbuffer>
+```
+
+### Standard topic vs reliable topic
+
+| Aspect | ITopic | IReliableTopic |
+|---|---|---|
+| Message persistence | No — in-memory events only | Yes — stored in Ringbuffer |
+| Survives node failure | No | Yes (with replication) |
+| Slow consumer handling | Messages may be dropped | Consumer can replay missed messages |
+| Threads | Shared event thread pool | Dedicated per-topic executor |
+| Use when | Low-latency fire-and-forget | Durability or catch-up replay needed |
+
+### Use cases
+
+Use topics for:
+
+1. Cache invalidation signals broadcast to all nodes
+2. Real-time dashboards or monitoring feeds
+3. Event-driven microservice communication within a cluster
+
+  </Tab>
+  <Tab title="Ringbuffer">
+
+## Ringbuffer
+
+`Ringbuffer` is a fixed-capacity circular buffer. When it is full, the oldest item is overwritten. Each item is assigned a unique, always-incrementing sequence number that you use for reading.
+
+Unlike `IQueue`, reads from a `Ringbuffer` are **non-destructive** — multiple consumers can read the same item independently. The trade-off is that there is no delivery acknowledgement; consumers must track their own sequence.
+
+<Note>
+`Ringbuffer` stores all data in a single partition (not spread across the cluster), similar to `IQueue`.
+</Note>
+
+### Getting a Ringbuffer
+
+```java
+HazelcastInstance hz = Hazelcast.newHazelcastInstance();
+Ringbuffer<String> buffer = hz.getRingbuffer("events");
+```
+
+### Writing
+
+```java
+// Add item to the tail, returns the assigned sequence number
+long seq = buffer.add("event-1");
+
+// Async add with overflow policy
+// OVERWRITE: overwrite oldest item when full (default for add())
+// FAIL: throw TopicOverloadException when full
+buffer.addAsync("event-2", OverflowPolicy.OVERWRITE)
+      .thenAccept(sequence -> System.out.println("Stored at: " + sequence));
+
+// Add a batch
+buffer.addAllAsync(
+    List.of("e1", "e2", "e3"),
+    OverflowPolicy.OVERWRITE);
+```
+
+### Reading
+
+```java
+// Capacity and occupancy
+long capacity = buffer.capacity();         // configured max
+long size      = buffer.size();            // current item count
+long head      = buffer.headSequence();    // oldest available sequence
+long tail      = buffer.tailSequence();    // newest available sequence
+
+// Read a single item — blocks until the sequence is available
+String item = buffer.readOne(head);
+
+// Read a batch of up to N items starting at a given sequence
+// Blocks until at least 1 item is available
+CompletionStage<ReadResultSet<String>> future =
+    buffer.readManyAsync(head, 1, 100, null); // min=1, max=100, filter=null
+
+ReadResultSet<String> results = future.toCompletableFuture().get();
+for (String event : results) {
+    System.out.println(event);
+}
+long nextSeq = results.getNextSequenceToReadFrom();
+```
+
+<Warning>
+If you try to read a sequence that has already been overwritten (i.e., it is less than `headSequence()`), a `StaleSequenceException` is thrown. Always check `headSequence()` before reading after a gap or restart.
+</Warning>
+
+### Capacity and TTL configuration
+
+```xml
+<ringbuffer name="events">
+    <capacity>50000</capacity>
+    <!-- Items expire after 60 seconds even if not overwritten -->
+    <time-to-live-seconds>60</time-to-live-seconds>
+    <backup-count>1</backup-count>
+    <in-memory-format>BINARY</in-memory-format>
+</ringbuffer>
+```
+
+### Consumer pattern
+
+Consumers track their own position. On restart, a consumer can resume from where it left off (as long as the sequence has not been overwritten):
+
+```java
+long seq = buffer.headSequence(); // start from the oldest available item
+
+while (true) {
+    try {
+        String event = buffer.readOne(seq);
+        process(event);
+        seq++;
+    } catch (StaleSequenceException e) {
+        // Fell behind — fast-forward to oldest available
+        seq = e.getHeadSeq();
+    }
+}
+```
+
+### Use cases
+
+Use Ringbuffer for:
+
+1. Audit logs that multiple services consume independently
+2. Event streaming with replay capability
+3. Backing store for `IReliableTopic`
+4. Time-windowed metrics pipelines
+
+  </Tab>
+</Tabs>

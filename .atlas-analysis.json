@@ -1,0 +1,124 @@
+{
+  "projectType": "data-platform",
+  "projectName": "Hazelcast",
+  "projectDescription": "A unified real-time data platform combining distributed stream processing with an in-memory data store for low-latency, high-throughput data applications.",
+  "theme": "aspen",
+  "primaryColor": "#ecf4fc",
+  "lightColor": "#b4fa07",
+  "darkColor": "#1e3d16",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/distributed-data-structures",
+              "concepts/clustering",
+              "concepts/partitioning-and-replication"
+            ]
+          },
+          {
+            "group": "Data Structures",
+            "pages": [
+              "data-structures/imap",
+              "data-structures/replicated-map",
+              "data-structures/multimap",
+              "data-structures/queue-topic-ringbuffer",
+              "data-structures/cp-subsystem"
+            ]
+          },
+          {
+            "group": "Stream Processing",
+            "pages": [
+              "stream-processing/overview",
+              "stream-processing/pipelines",
+              "stream-processing/sources-and-sinks",
+              "stream-processing/windowing-and-aggregation",
+              "stream-processing/fault-tolerance"
+            ]
+          },
+          {
+            "group": "SQL",
+            "pages": [
+              "sql/overview",
+              "sql/querying-maps",
+              "sql/streaming-queries"
+            ]
+          },
+          {
+            "group": "Configuration & Operations",
+            "pages": [
+              "operations/configuration",
+              "operations/security",
+              "operations/wan-replication",
+              "operations/persistence",
+              "operations/monitoring"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Java API",
+            "pages": [
+              "api/hazelcast-instance",
+              "api/imap",
+              "api/sql-service",
+              "api/jet-service",
+              "api/pipeline",
+              "api/sources-and-sinks"
+            ]
+          },
+          {
+            "group": "Client Libraries",
+            "pages": [
+              "api/java-client",
+              "api/other-clients"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Distributed in-memory IMap with querying, event listeners, and caching patterns (read/write-through, write-behind)",
+    "Built-in Jet stream processing engine for real-time and batch data pipelines",
+    "Distributed SQL queries over IMap, Kafka, and file sources powered by Apache Calcite",
+    "CP Subsystem with linearizable data structures (IAtomicLong, ISemaphore, ICountDownLatch) based on Raft consensus",
+    "Comprehensive connector library: Kafka, Hadoop, S3, RDBMS, JMS, and more",
+    "WAN replication for multi-datacenter and multi-region deployments",
+    "Hot restart persistence for cluster recovery without data loss",
+    "Vector search capabilities for ML/AI-driven workloads",
+    "Tiered storage combining in-memory and disk-based storage",
+    "Client libraries in Java, Python, Node.js, .NET, C++, and Go"
+  ],
+  "publicApiSurface": [
+    "HazelcastInstance — entry point for all Hazelcast services",
+    "IMap<K,V> — concurrent, distributed, queryable key-value store",
+    "SqlService#execute(String sql, Object... arguments) — distributed SQL execution",
+    "JetService#newJob(Pipeline pipeline) — submit a stream/batch processing job",
+    "Pipeline — fluent API to build data processing pipelines",
+    "Sources — factory for batch and streaming pipeline sources (IMap, Kafka, files, JDBC, JMS, sockets)",
+    "Sinks — factory for pipeline sinks (IMap, files, JDBC, JMS, Kafka)",
+    "Job — handle to a submitted Jet computation job",
+    "CPSubsystem — access to CP (strongly consistent) data structures",
+    "IAtomicLong / IAtomicReference / ISemaphore / ICountDownLatch — CP primitives",
+    "HazelcastClient#newHazelcastClient(ClientConfig) — create a client instance",
+    "Config / XmlConfigBuilder / YamlConfigBuilder — programmatic and file-based cluster configuration",
+    "WanReplicationConfig — configure cross-cluster/cross-datacenter replication",
+    "VectorDocument / SearchOptions — vector similarity search API",
+    "DataConnectionService — manage external data connections for SQL and Jet pipelines"
+  ]
+}

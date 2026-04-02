@@ -1,0 +1,246 @@
+---
+title: "Building pipelines"
+description: "How to create a Pipeline object, attach sources and transforms, submit the job, and monitor or cancel it."
+---
+
+A `Pipeline` models your computation as a graph of stages. You build it programmatically using the fluent API, then submit it to the Hazelcast cluster as a `Job`.
+
+## Build a pipeline step by step
+
+<Steps>
+  <Step title="Create a pipeline">
+    Call `Pipeline.create()` to get an empty pipeline.
+
+    ```java
+    import com.hazelcast.jet.pipeline.Pipeline;
+
+    Pipeline pipeline = Pipeline.create();
+    ```
+  </Step>
+
+  <Step title="Attach a source">
+    Call `pipeline.readFrom()` with a `BatchSource` or `StreamSource`. The return type is either a `BatchStage` (bounded) or a `StreamSourceStage` (unbounded).
+
+    <CodeGroup>
+    ```java Batch — IMap
+    import com.hazelcast.jet.pipeline.Sources;
+
+    BatchStage<Map.Entry<String, Integer>> stage =
+            pipeline.readFrom(Sources.map("orders"));
+    ```
+
+    ```java Streaming — IMap journal
+    import com.hazelcast.jet.pipeline.JournalInitialPosition;
+
+    StreamSourceStage<Map.Entry<String, Integer>> stage =
+            pipeline.readFrom(Sources.mapJournal(
+                    "orders",
+                    JournalInitialPosition.START_FROM_CURRENT));
+    ```
+
+    ```java Streaming — Kafka
+    import org.apache.kafka.common.serialization.StringDeserializer;
+    import java.util.Properties;
+
+    Properties props = new Properties();
+    props.setProperty("bootstrap.servers", "localhost:9092");
+    props.setProperty("key.deserializer", StringDeserializer.class.getName());
+    props.setProperty("value.deserializer", StringDeserializer.class.getName());
+    props.setProperty("auto.offset.reset", "earliest");
+
+    StreamSourceStage<Map.Entry<String, String>> stage =
+            pipeline.readFrom(KafkaSources.kafka(props, "events"));
+    ```
+
+    ```java Batch — files
+    BatchStage<String> stage =
+            pipeline.readFrom(Sources.files("/data/logs"));
+    ```
+    </CodeGroup>
+
+    For streaming sources you must also declare the event-time policy before attaching further stages:
+
+    ```java
+    StreamStage<Map.Entry<String, Integer>> stream =
+            stage.withIngestionTimestamps();
+    // or: stage.withNativeTimestamps(maxLagMs)
+    // or: stage.withTimestamps(item -> item.getValue().getTimestamp(), maxLagMs)
+    ```
+  </Step>
+
+  <Step title="Apply transforms">
+    Chain transforms on the stage. Each method returns a new stage — the original is unchanged.
+
+    **map** — transform each item:
+    ```java
+    BatchStage<String> names = stage.map(entry -> entry.getKey());
+    ```
+
+    **filter** — drop items that do not match a predicate:
+    ```java
+    BatchStage<Map.Entry<String, Integer>> highValue =
+            stage.filter(e -> e.getValue() > 1000);
+    ```
+
+    **flatMap** — emit zero or more items for each input item:
+    ```java
+    BatchStage<String> words = stage.flatMap(
+            line -> Traversers.traverseArray(line.getValue().split("\\s+")));
+    ```
+
+    **groupingKey** — partition items by a key for downstream aggregation:
+    ```java
+    BatchStageWithKey<Map.Entry<String, Integer>, String> grouped =
+            stage.groupingKey(Map.Entry::getKey);
+    ```
+
+    **aggregate** — compute an aggregate over a batch stage with a key:
+    ```java
+    import com.hazelcast.jet.aggregate.AggregateOperations;
+
+    BatchStage<Map.Entry<String, Long>> counts =
+            stage.groupingKey(Map.Entry::getKey)
+                 .aggregate(AggregateOperations.counting());
+    ```
+  </Step>
+
+  <Step title="Merge or join streams">
+    To combine two streams of the same type, use `merge`:
+    ```java
+    StreamStage<Event> merged = stream1.merge(stream2);
+    ```
+
+    To enrich a streaming stage with data from a batch stage, use `hashJoin`:
+    ```java
+    BatchStage<Map.Entry<String, Product>> products =
+            pipeline.readFrom(Sources.map("products"));
+
+    StreamStage<EnrichedEvent> enriched = events.hashJoin(
+            products,
+            JoinClause.joinMapEntries(Event::getProductId),
+            (event, product) -> new EnrichedEvent(event, product));
+    ```
+  </Step>
+
+  <Step title="Attach a sink">
+    Call `writeTo()` on any stage to drain it to a sink:
+    ```java
+    stage.writeTo(Sinks.map("results"));
+    ```
+
+    You can drain multiple stages to the same sink using `pipeline.writeTo()`:
+    ```java
+    pipeline.writeTo(Sinks.logger(), stage1, stage2);
+    ```
+  </Step>
+
+  <Step title="Configure the job">
+    Create a `JobConfig` to set the job name, processing guarantee, and snapshot interval:
+
+    ```java
+    import com.hazelcast.jet.config.JobConfig;
+    import com.hazelcast.jet.config.ProcessingGuarantee;
+
+    JobConfig config = new JobConfig()
+            .setName("order-counter")
+            .setProcessingGuarantee(ProcessingGuarantee.AT_LEAST_ONCE)
+            .setSnapshotIntervalMillis(5_000);
+    ```
+  </Step>
+
+  <Step title="Submit the job">
+    Get the `JetService` from a `HazelcastInstance` and call `newJob()`:
+
+    ```java
+    HazelcastInstance hz = Hazelcast.bootstrappedInstance();
+    Job job = hz.getJet().newJob(pipeline, config);
+    ```
+
+    Use `newJobIfAbsent()` when you want at most one active instance of a named job:
+
+    ```java
+    Job job = hz.getJet().newJobIfAbsent(pipeline, config);
+    ```
+  </Step>
+</Steps>
+
+## Monitoring a job
+
+After submission, use the `Job` handle to inspect the job:
+
+```java
+// Get the current status
+JobStatus status = job.getStatus();
+// Returns: STARTING, RUNNING, SUSPENDED, COMPLETING, COMPLETED, or FAILED
+
+// Block until the job finishes (batch jobs only — streaming jobs run forever)
+job.join();
+
+// Get the job by name from another client
+Job existing = hz.getJet().getJob("order-counter");
+```
+
+`JobStatus` values:
+
+| Status | Meaning |
+|---|---|
+| `STARTING` | Job is being initialised |
+| `RUNNING` | Job is executing |
+| `SUSPENDED` | Job is paused, state is preserved |
+| `COMPLETING` | Job is finishing up |
+| `COMPLETED` | Job finished successfully |
+| `FAILED` | Job terminated with an error |
+
+## Cancelling a job
+
+```java
+job.cancel();
+// job.join() will now throw CancellationException
+```
+
+`cancel()` is asynchronous. The job stops executing on all members a short time after this call returns.
+
+## Complete examples
+
+### Batch pipeline — word count
+
+```java
+Pipeline pipeline = Pipeline.create();
+
+pipeline.readFrom(Sources.files("/data/texts"))
+        .flatMap(line -> Traversers.traverseArray(line.split("\\s+")))
+        .filter(word -> !word.isEmpty())
+        .groupingKey(word -> word)
+        .aggregate(AggregateOperations.counting())
+        .writeTo(Sinks.map("word-counts"));
+
+JobConfig config = new JobConfig().setName("word-count");
+hz.getJet().newJob(pipeline, config).join();
+```
+
+### Streaming pipeline — event enrichment
+
+```java
+Pipeline pipeline = Pipeline.create();
+
+BatchStage<Map.Entry<String, Product>> products =
+        pipeline.readFrom(Sources.map("products"));
+
+pipeline.readFrom(Sources.mapJournal("events", JournalInitialPosition.START_FROM_CURRENT))
+        .withIngestionTimestamps()
+        .hashJoin(
+                products,
+                JoinClause.joinMapEntries(Event::getProductId),
+                (event, product) -> new EnrichedEvent(event, product))
+        .writeTo(Sinks.map("enriched-events"));
+
+JobConfig config = new JobConfig()
+        .setName("event-enrichment")
+        .setProcessingGuarantee(ProcessingGuarantee.AT_LEAST_ONCE);
+
+hz.getJet().newJob(pipeline, config);
+```
+
+<Tip>
+For jobs where startup overhead matters (e.g. short-lived batch queries), use `JetService.newLightJob()`. Light jobs bypass some coordination steps but do not support processing guarantees or custom classpath resources.
+</Tip>

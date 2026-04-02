@@ -1,0 +1,307 @@
+---
+title: "CP subsystem"
+description: "Hazelcast's Raft-based strongly consistent layer. Provides linearizable distributed primitives including IAtomicLong, IAtomicReference, ISemaphore, ICountDownLatch, and FencedLock."
+---
+
+The CP Subsystem is Hazelcast's strongly consistent, linearizable layer built on the [Raft consensus algorithm](https://raft.github.io/). While most Hazelcast data structures (such as `IMap` and `IQueue`) follow AP semantics — prioritizing availability and partition tolerance — the CP Subsystem prioritizes consistency, making it suitable for distributed coordination: leader election, distributed locking, counters, and synchronization primitives.
+
+## CP vs AP data structures
+
+| | AP data structures (e.g. IMap) | CP Subsystem |
+|---|---|---|
+| CAP | Available + Partition Tolerant | Consistent + Partition Tolerant |
+| Consistency | Eventual (or per-operation linearizable) | Always linearizable |
+| During partition | Remains available on both sides | Available on majority side only |
+| Use when | General data storage | Coordination, locking, counters |
+
+## Enabling CP Subsystem
+
+CP Subsystem requires a minimum of **3 CP members** to form a quorum. Set the CP member count in your configuration before starting the cluster — it cannot be changed dynamically.
+
+<Steps>
+  <Step title="Configure CP member count">
+    ```xml
+    <hazelcast>
+        <cp-subsystem>
+            <!-- Minimum 3, typically 3 or 5 -->
+            <cp-member-count>3</cp-member-count>
+            <!-- CP group size; must be odd and <= cp-member-count -->
+            <group-size>3</group-size>
+        </cp-subsystem>
+    </hazelcast>
+    ```
+
+    Or programmatically:
+
+    ```java
+    Config config = new Config();
+    config.getCPSubsystemConfig().setCPMemberCount(3);
+    config.getCPSubsystemConfig().setGroupSize(3);
+    HazelcastInstance hz = Hazelcast.newHazelcastInstance(config);
+    ```
+  </Step>
+  <Step title="Start at least 3 members">
+    The CP discovery process completes automatically once the first N members (where N = `cp-member-count`) join the cluster. The cluster becomes fully operational at that point.
+  </Step>
+  <Step title="Access the CP Subsystem">
+    ```java
+    CPSubsystem cp = hz.getCPSubsystem();
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+**Cache your CP proxies.** Every call to `getAtomicLong()`, `getLock()`, `getSemaphore()`, etc., performs an internal commit to the METADATA CP group. Fetch the proxy once and reuse it.
+</Warning>
+
+## CP groups
+
+CP data structures live inside *CP groups*. Each group elects its own Raft leader and runs the Raft algorithm independently. By default, structures are placed in the `DEFAULT` CP group. You can assign a structure to a custom group using the `@groupName` suffix:
+
+```java
+// In the DEFAULT CP group
+IAtomicLong counter = cp.getAtomicLong("myCounter");
+
+// In a dedicated CP group named "counters"
+IAtomicLong shardedCounter = cp.getAtomicLong("myCounter@counters");
+```
+
+Custom groups are useful to distribute load when the DEFAULT group becomes a bottleneck.
+
+---
+
+## CP data structures
+
+<AccordionGroup>
+  <Accordion title="IAtomicLong">
+
+`IAtomicLong` is a linearizable distributed counter, equivalent to `java.util.concurrent.atomic.AtomicLong`.
+
+```java
+IAtomicLong counter = hz.getCPSubsystem().getAtomicLong("hits");
+
+// Read
+long current = counter.get();
+
+// Set
+counter.set(100);
+
+// Increment and return new value
+long next = counter.incrementAndGet();
+
+// Decrement and return new value
+long prev = counter.decrementAndGet();
+
+// Add delta
+long result = counter.addAndGet(10);
+
+// Compare and swap
+boolean swapped = counter.compareAndSet(100, 200); // expect=100, update=200
+
+// Get then increment
+long old = counter.getAndIncrement();
+
+// Apply a function in place (alter)
+counter.alter(v -> v * 2);
+
+// Apply a function and return the result without mutating the stored value
+String formatted = counter.apply(v -> "count=" + v);
+
+// Async variant
+counter.addAndGetAsync(5)
+       .whenComplete((val, err) -> System.out.println("New value: " + val));
+```
+
+  </Accordion>
+  <Accordion title="IAtomicReference">
+
+`IAtomicReference` is a linearizable distributed reference to any serializable object, equivalent to `java.util.concurrent.atomic.AtomicReference`.
+
+```java
+IAtomicReference<String> leaderRef = hz.getCPSubsystem()
+    .getAtomicReference("cluster-leader");
+
+// Read
+String leader = leaderRef.get();
+
+// Set
+leaderRef.set("node-1");
+
+// Get and then set a new value
+String previous = leaderRef.getAndSet("node-2");
+
+// Atomic compare and swap
+boolean updated = leaderRef.compareAndSet("node-2", "node-3");
+
+// Check for null
+boolean empty = leaderRef.isNull();
+
+// Clear (set to null)
+leaderRef.clear();
+
+// Apply a transformation and store the result
+leaderRef.alter(name -> name + "-active");
+
+// Read via apply (no mutation)
+int len = leaderRef.apply(String::length);
+
+// Async read
+leaderRef.getAsync().thenAccept(val -> System.out.println("Leader: " + val));
+```
+
+  </Accordion>
+  <Accordion title="ISemaphore">
+
+`ISemaphore` is a linearizable distributed counting semaphore, equivalent to `java.util.concurrent.Semaphore`. It restricts the number of concurrent threads or clients that can access a resource.
+
+```java
+ISemaphore semaphore = hz.getCPSubsystem().getSemaphore("db-connections");
+
+// Initialize with N permits (idempotent — returns false if already initialized)
+semaphore.init(10);
+
+// Acquire 1 permit — blocks if none available
+semaphore.acquire();
+
+// Acquire multiple permits
+semaphore.acquire(3);
+
+// Try to acquire without blocking — returns false if not available
+boolean got = semaphore.tryAcquire();
+
+// Try to acquire with timeout
+boolean gotInTime = semaphore.tryAcquire(1, 5, TimeUnit.SECONDS);
+
+// Release 1 permit
+semaphore.release();
+
+// Release multiple permits
+semaphore.release(3);
+
+// Check available permits (for diagnostics)
+int available = semaphore.availablePermits();
+
+// Drain all permits and return count
+int drained = semaphore.drainPermits();
+```
+
+<Note>
+By default, `ISemaphore` uses session-aware mode: permits acquired by a caller are automatically released if that caller's CP session expires (e.g., due to a crash). This prevents stuck permits but means a `HazelcastInstance` can only release permits it has previously acquired. Enable JDK compatibility mode (`setJDKCompatible(true)`) for the sessionless behavior that matches `java.util.concurrent.Semaphore`.
+</Note>
+
+  </Accordion>
+  <Accordion title="ICountDownLatch">
+
+`ICountDownLatch` is a linearizable distributed countdown latch for synchronizing distributed phases. Unlike `java.util.concurrent.CountDownLatch`, the count can be reset after completion, and there is no unbounded `await()`.
+
+```java
+ICountDownLatch latch = hz.getCPSubsystem().getCountDownLatch("start-gate");
+
+// --- Coordinator side ---
+// Set the count (returns false if a countdown is currently in progress)
+boolean set = latch.trySetCount(5);
+
+// --- Worker side ---
+// Signal completion
+latch.countDown();
+
+// --- Waiting side ---
+// Wait up to 30 seconds for count to reach zero
+boolean done = latch.await(30, TimeUnit.SECONDS);
+if (!done) {
+    System.out.println("Timed out waiting for all workers");
+}
+
+// Read current count
+int remaining = latch.getCount();
+```
+
+<Note>
+Always use `await(timeout, unit)` instead of an unbounded wait. In a distributed environment, members can crash or disconnect, and an unbounded wait may never return.
+</Note>
+
+  </Accordion>
+  <Accordion title="FencedLock">
+
+`FencedLock` is a linearizable, reentrant distributed lock backed by CP Subsystem. It extends `java.util.concurrent.locks.Lock` and adds a *fencing token* — a monotonically increasing number assigned each time the lock changes owner. Pass this token to external resources to detect and reject requests from stale lock holders (e.g., a GC-paused process that lost lock ownership but has not yet noticed).
+
+```java
+FencedLock lock = hz.getCPSubsystem().getLock("resource-lock");
+
+// Acquire — blocks until acquired
+lock.lock();
+try {
+    // critical section
+} finally {
+    lock.unlock();
+}
+
+// Try to acquire without blocking
+if (lock.tryLock()) {
+    try {
+        // critical section
+    } finally {
+        lock.unlock();
+    }
+}
+
+// Try with timeout
+if (lock.tryLock(5, TimeUnit.SECONDS)) {
+    try {
+        // critical section
+    } finally {
+        lock.unlock();
+    }
+}
+
+// Acquire and retrieve the fencing token
+long fence = lock.lockAndGetFence();
+try {
+    // Pass fence to an external service to guard against stale writes
+    externalService.write(data, fence);
+} finally {
+    lock.unlock();
+}
+
+// Check ownership
+boolean isHeld = lock.isLockedByCurrentThread();
+int holdCount = lock.getLockCount();
+```
+
+<Warning>
+Distributed locks are not equivalent to single-JVM mutexes. A long GC pause or network interruption can cause your CP session to expire, at which point another client may acquire the lock. Use the fencing token to guard external resources if strict mutual exclusion is required.
+</Warning>
+
+FencedLock is reentrant by default. You can configure reentrancy limits per lock name:
+
+```xml
+<cp-subsystem>
+    <fenced-lock-configs>
+        <fenced-lock-config name="resource-lock">
+            <!-- 0 = unlimited reentrancy; set to 1 for non-reentrant -->
+            <lock-acquire-limit>1</lock-acquire-limit>
+        </fenced-lock-config>
+    </fenced-lock-configs>
+</cp-subsystem>
+```
+
+  </Accordion>
+</AccordionGroup>
+
+## Fault tolerance
+
+CP Subsystem tolerates the failure of fewer than half its CP members (`N/2` out of `N`). For a group of 3 members, 1 failure is tolerated; for 5 members, 2 failures. Operations on the majority partition remain available; operations on the minority partition fail.
+
+By default, CP state is stored only in memory. Enable persistence to allow crashed CP members to rejoin and restore their state:
+
+```xml
+<cp-subsystem>
+    <cp-member-count>3</cp-member-count>
+    <persistence-enabled>true</persistence-enabled>
+    <base-dir>/data/cp-persistence</base-dir>
+</cp-subsystem>
+```
+
+<Info>
+Enabling CP Subsystem Persistence significantly improves reliability. Without it, a crashed CP member cannot rejoin with its previous identity; you must manually remove and replace it using `CPSubsystemManagementService`.
+</Info>

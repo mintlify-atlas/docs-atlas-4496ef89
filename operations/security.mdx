@@ -1,0 +1,288 @@
+---
+title: "Security"
+description: "Secure Hazelcast with authentication realms, TLS/SSL encryption, and client permissions. This page covers the SecurityConfig API, simple username/password auth, TLS setup, the permissions system, and security interceptors."
+---
+
+Hazelcast's security system controls authentication for both member-to-member and client-to-member communication, encrypts traffic with TLS/SSL, and enforces fine-grained authorization through a permissions system.
+
+<Note>
+Full role-based access control (RBAC), LDAP authentication, and Kerberos require **Hazelcast Enterprise**. The `SecurityConfig` API and basic TLS are available in all editions.
+</Note>
+
+## Enabling security
+
+Security is disabled by default. Enable it through `SecurityConfig`:
+
+```java
+import com.hazelcast.config.Config;
+import com.hazelcast.config.SecurityConfig;
+
+Config config = new Config();
+SecurityConfig securityConfig = config.getSecurityConfig();
+securityConfig.setEnabled(true);
+```
+
+```xml hazelcast.xml
+<security enabled="true">
+    <!-- realm and permission configuration goes here -->
+</security>
+```
+
+## Authentication with security realms
+
+Hazelcast uses named **security realms** to decouple authentication configuration from the components that use it (member authentication, client authentication). Each realm defines how incoming credentials are validated and, optionally, how this member identifies itself to others.
+
+### Simple username/password authentication
+
+The `SimpleAuthenticationConfig` lets you list users with passwords and roles directly in the configuration. This is suitable for development and small deployments.
+
+<CodeGroup>
+
+```java Java
+import com.hazelcast.config.Config;
+import com.hazelcast.config.SecurityConfig;
+import com.hazelcast.config.security.RealmConfig;
+import com.hazelcast.config.security.SimpleAuthenticationConfig;
+
+SimpleAuthenticationConfig simpleAuth = new SimpleAuthenticationConfig()
+        .addUser("alice", "s3cr3t", "admin", "monitor")
+        .addUser("bob",   "p@ssw0rd", "monitor");
+
+RealmConfig realmConfig = new RealmConfig()
+        .setSimpleAuthenticationConfig(simpleAuth);
+
+SecurityConfig securityConfig = new SecurityConfig()
+        .setEnabled(true)
+        .setClientRealmConfig("clientRealm", realmConfig);
+
+config.setSecurityConfig(securityConfig);
+```
+
+```xml XML
+<security enabled="true">
+    <realms>
+        <realm name="clientRealm">
+            <authentication>
+                <simple>
+                    <user username="alice" password="s3cr3t">
+                        <role>admin</role>
+                        <role>monitor</role>
+                    </user>
+                    <user username="bob" password="p@ssw0rd">
+                        <role>monitor</role>
+                    </user>
+                </simple>
+            </authentication>
+        </realm>
+    </realms>
+    <client-authentication realm="clientRealm"/>
+</security>
+```
+
+```yaml YAML
+hazelcast:
+  security:
+    enabled: true
+    realms:
+      - name: clientRealm
+        authentication:
+          simple:
+            users:
+              - username: alice
+                password: s3cr3t
+                roles:
+                  - admin
+                  - monitor
+              - username: bob
+                password: p@ssw0rd
+                roles:
+                  - monitor
+    client-authentication:
+      realm: clientRealm
+```
+
+</CodeGroup>
+
+### Member-to-member authentication
+
+Assign a realm to member authentication with `setMemberRealm`. Use `setMemberRealmConfig` as a shorthand that adds the realm and sets the reference in one call:
+
+```java
+import com.hazelcast.config.security.UsernamePasswordIdentityConfig;
+
+RealmConfig memberRealm = new RealmConfig()
+        .setSimpleAuthenticationConfig(
+            new SimpleAuthenticationConfig().addUser("member1", "secret", "cluster"))
+        .setUsernamePasswordIdentityConfig("member1", "secret");
+
+securityConfig.setMemberRealmConfig("memberRealm", memberRealm);
+```
+
+### Token-based authentication
+
+For client connections that pass a token instead of a username/password, configure a `TokenIdentityConfig` on the client:
+
+```java
+import com.hazelcast.config.security.TokenIdentityConfig;
+import com.hazelcast.config.security.TokenEncoding;
+
+RealmConfig realmConfig = new RealmConfig()
+        .setTokenIdentityConfig(
+            new TokenIdentityConfig(TokenEncoding.NONE, "my-secret-token"));
+```
+
+## TLS/SSL
+
+Enable TLS to encrypt all member-to-member and client-to-member communication. Hazelcast uses a `SSLConfig` backed by a `SSLContextFactory` implementation. The built-in `BasicSSLContextFactory` wraps standard Java keystore/truststore files.
+
+<CodeGroup>
+
+```java Java
+import com.hazelcast.config.SSLConfig;
+
+SSLConfig sslConfig = new SSLConfig()
+        .setEnabled(true)
+        .setFactoryClassName("com.hazelcast.nio.ssl.BasicSSLContextFactory")
+        .setProperty("protocol", "TLSv1.3")
+        .setProperty("mutualAuthentication", "REQUIRED")
+        .setProperty("keyStore", "/opt/hazelcast.keystore")
+        .setProperty("keyStorePassword", "keystorepass")
+        .setProperty("keyStoreType", "JKS")
+        .setProperty("trustStore", "/opt/hazelcast.truststore")
+        .setProperty("trustStorePassword", "truststorepass")
+        .setProperty("trustStoreType", "JKS");
+
+config.getNetworkConfig().setSSLConfig(sslConfig);
+```
+
+```xml XML
+<network>
+    <ssl enabled="true">
+        <factory-class-name>
+            com.hazelcast.nio.ssl.BasicSSLContextFactory
+        </factory-class-name>
+        <properties>
+            <property name="protocol">TLSv1.3</property>
+            <property name="mutualAuthentication">REQUIRED</property>
+            <property name="keyStore">/opt/hazelcast.keystore</property>
+            <property name="keyStorePassword">keystorepass</property>
+            <property name="keyStoreType">JKS</property>
+            <property name="trustStore">/opt/hazelcast.truststore</property>
+            <property name="trustStorePassword">truststorepass</property>
+            <property name="trustStoreType">JKS</property>
+        </properties>
+    </ssl>
+</network>
+```
+
+```yaml YAML
+hazelcast:
+  network:
+    ssl:
+      enabled: true
+      factory-class-name: com.hazelcast.nio.ssl.BasicSSLContextFactory
+      properties:
+        protocol: TLSv1.3
+        mutualAuthentication: REQUIRED
+        keyStore: /opt/hazelcast.keystore
+        keyStorePassword: keystorepass
+        keyStoreType: JKS
+        trustStore: /opt/hazelcast.truststore
+        trustStorePassword: truststorepass
+        trustStoreType: JKS
+```
+
+</CodeGroup>
+
+<Tip>
+Set `mutualAuthentication` to `REQUIRED` so that both the member and connecting clients must present valid certificates. This is the strongest TLS configuration.
+</Tip>
+
+## Authorization with client permissions
+
+The permissions system controls which operations a client can perform on specific data structures. You configure permissions in `SecurityConfig` using `PermissionConfig` objects.
+
+### Configuring permissions
+
+```java
+import com.hazelcast.config.PermissionConfig;
+import com.hazelcast.config.PermissionConfig.PermissionType;
+
+// Grant all map operations on "orders" to principal "alice"
+PermissionConfig mapPermission = new PermissionConfig(
+        PermissionType.MAP, "orders", "alice")
+        .addAction("all");
+
+// Grant read-only access to all maps for principal "bob"
+PermissionConfig readPermission = new PermissionConfig(
+        PermissionType.MAP, "*", "bob")
+        .addAction("create")
+        .addAction("read");
+
+securityConfig.addClientPermissionConfig(mapPermission);
+securityConfig.addClientPermissionConfig(readPermission);
+```
+
+In XML:
+
+```xml hazelcast.xml
+<security enabled="true">
+    <client-permissions>
+        <map-permission name="orders" principal="alice">
+            <actions>
+                <action>all</action>
+            </actions>
+        </map-permission>
+        <map-permission name="*" principal="bob">
+            <actions>
+                <action>create</action>
+                <action>read</action>
+            </actions>
+        </map-permission>
+        <queue-permission name="task-queue" principal="alice">
+            <actions>
+                <action>all</action>
+            </actions>
+        </queue-permission>
+    </client-permissions>
+</security>
+```
+
+### Blocking unmapped actions
+
+By default (`clientBlockUnmappedActions = true`), executor tasks from clients that have no matching permission are blocked. Set this to `false` only if you want to allow all unmapped executor actions:
+
+```java
+securityConfig.setClientBlockUnmappedActions(true);
+```
+
+### Permission priority
+
+By default, deny permissions take precedence over grant permissions. Reverse this with:
+
+```java
+securityConfig.setPermissionPriorityGrant(true);
+```
+
+## Security interceptors
+
+A security interceptor lets you intercept every remote operation executed by a client before it runs on the member. Implement the `SecurityInterceptor` interface and register it:
+
+```java
+import com.hazelcast.config.SecurityInterceptorConfig;
+
+SecurityInterceptorConfig interceptorConfig = new SecurityInterceptorConfig()
+        .setClassName("com.example.AuditSecurityInterceptor");
+
+securityConfig.addSecurityInterceptorConfig(interceptorConfig);
+```
+
+```xml hazelcast.xml
+<security enabled="true">
+    <security-interceptors>
+        <interceptor class-name="com.example.AuditSecurityInterceptor"/>
+    </security-interceptors>
+</security>
+```
+
+The `SecurityInterceptor` interface receives the `Credentials` of the caller, the service name, and the operation name, allowing you to log, audit, or reject calls programmatically.

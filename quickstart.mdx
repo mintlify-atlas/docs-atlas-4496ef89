@@ -1,80 +1,186 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: "Quick Start"
+description: "Get a Hazelcast cluster running and execute your first distributed data operations in under 5 minutes."
 ---
 
-## Get started in three steps
+This guide takes you from zero to a working Hazelcast cluster. You will start a local node, store and retrieve data using `IMap`, run a SQL query, and submit a simple stream processing pipeline.
 
-Get your documentation site running locally and make your first customization.
+<Info>
+  Hazelcast requires **JDK 17 or later**. SQL features require the `hazelcast-sql` module on the member classpath.
+</Info>
 
-### Step 1: Set up your local environment
+## Step 1: Add the dependency
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+Add Hazelcast to your Java project:
 
-### Step 2: Deploy your changes
+<CodeGroup>
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+```xml Maven pom.xml
+<dependency>
+  <groupId>com.hazelcast</groupId>
+  <artifactId>hazelcast</artifactId>
+  <version>5.5.0</version>
+</dependency>
+```
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+```groovy Gradle build.gradle
+implementation 'com.hazelcast:hazelcast:5.5.0'
+```
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+```kotlin Gradle (Kotlin) build.gradle.kts
+implementation("com.hazelcast:hazelcast:5.5.0")
+```
 
-### Step 3: Go live
+</CodeGroup>
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+To use SQL queries on a cluster member, also add:
+
+```xml Maven pom.xml
+<dependency>
+  <groupId>com.hazelcast</groupId>
+  <artifactId>hazelcast-sql</artifactId>
+  <version>5.5.0</version>
+</dependency>
+```
+
+## Step 2: Start a Hazelcast instance
+
+Create and start a Hazelcast member. A single node is already a fully functional cluster:
+
+```java QuickStart.java
+import com.hazelcast.core.Hazelcast;
+import com.hazelcast.core.HazelcastInstance;
+
+public class QuickStart {
+    public static void main(String[] args) {
+        HazelcastInstance hz = Hazelcast.newHazelcastInstance();
+        System.out.println("Hazelcast started: " + hz.getName());
+    }
+}
+```
+
+You should see output like:
+
+```
+Members {size:1, ver:1} [
+    Member [localhost]:5701 - <uuid> this
+]
+Hazelcast started: hazelcast_instance_1
+```
+
+## Step 3: Store and retrieve data with IMap
+
+`IMap` is the core distributed data structure — a concurrent, partitioned key-value store:
+
+```java IMapExample.java
+import com.hazelcast.core.Hazelcast;
+import com.hazelcast.core.HazelcastInstance;
+import com.hazelcast.map.IMap;
+import com.hazelcast.query.Predicates;
+import java.util.Collection;
+
+HazelcastInstance hz = Hazelcast.newHazelcastInstance();
+
+// Get (or create) a distributed map
+IMap<String, String> capitals = hz.getMap("capitals");
+
+// Store data
+capitals.put("France", "Paris");
+capitals.put("Germany", "Berlin");
+capitals.put("Japan", "Tokyo");
+
+// Retrieve data
+String capital = capitals.get("France");
+System.out.println("Capital of France: " + capital); // Paris
+
+// Query with a predicate
+Collection<String> results = capitals.values(Predicates.equal("__value", "Paris"));
+System.out.println("Cities named Paris: " + results); // [Paris]
+
+System.out.println("Total entries: " + capitals.size()); // 3
+```
+
+## Step 4: Run a SQL query
+
+Use the SQL service to query your map using standard SQL syntax. First create a mapping that exposes the map as a SQL table:
+
+```java SqlExample.java
+import com.hazelcast.core.Hazelcast;
+import com.hazelcast.core.HazelcastInstance;
+import com.hazelcast.sql.SqlResult;
+import com.hazelcast.sql.SqlRow;
+
+HazelcastInstance hz = Hazelcast.newHazelcastInstance();
+
+// Create a SQL mapping for the "capitals" IMap
+hz.getSql().executeUpdate(
+    "CREATE OR REPLACE MAPPING capitals (" +
+    "  __key VARCHAR," +
+    "  __value VARCHAR" +
+    ") TYPE IMap OPTIONS (" +
+    "  'keyFormat' = 'varchar'," +
+    "  'valueFormat' = 'varchar'" +
+    ")"
+);
+
+// Populate data
+hz.getMap("capitals").put("France", "Paris");
+hz.getMap("capitals").put("Germany", "Berlin");
+
+// Run a SQL SELECT
+try (SqlResult result = hz.getSql().execute("SELECT __key, __value FROM capitals ORDER BY __key")) {
+    for (SqlRow row : result) {
+        System.out.println(row.getObject("__key") + " -> " + row.getObject("__value"));
+    }
+}
+// Output:
+// France -> Paris
+// Germany -> Berlin
+```
+
+## Step 5: Submit a stream processing pipeline
+
+Build a simple batch pipeline using the Jet engine. This example reads from `IMap` and logs each entry:
+
+```java PipelineExample.java
+import com.hazelcast.core.Hazelcast;
+import com.hazelcast.core.HazelcastInstance;
+import com.hazelcast.jet.pipeline.Pipeline;
+import com.hazelcast.jet.pipeline.Sources;
+import com.hazelcast.jet.pipeline.Sinks;
+
+HazelcastInstance hz = Hazelcast.newHazelcastInstance();
+
+// Populate data
+hz.getMap("numbers").put("one", 1);
+hz.getMap("numbers").put("two", 2);
+hz.getMap("numbers").put("three", 3);
+
+// Build a pipeline: read from IMap, filter, log results
+Pipeline pipeline = Pipeline.create();
+pipeline.readFrom(Sources.<String, Integer>map("numbers"))
+        .filter(entry -> entry.getValue() > 1)
+        .writeTo(Sinks.logger());
+
+// Submit the job and wait for it to complete
+hz.getJet().newJob(pipeline).join();
+```
+
+You should see log output for entries with values greater than 1.
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Installation" icon="download" href="/installation">
+    Learn all installation methods including Docker and building from source.
+  </Card>
+  <Card title="IMap Deep Dive" icon="database" href="/data-structures/imap">
+    Explore the full IMap API: async operations, predicates, entry processors, and more.
+  </Card>
+  <Card title="Stream Processing" icon="bolt" href="/stream-processing/overview">
+    Build real-time and batch data pipelines with the Jet engine.
+  </Card>
+  <Card title="SQL" icon="magnifying-glass" href="/sql/overview">
+    Run distributed SQL queries over maps, Kafka, and file sources.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

@@ -1,0 +1,176 @@
+---
+title: "Windowing and aggregation"
+description: "How to group a stream into time windows and compute aggregates using tumbling, sliding, and session windows."
+---
+
+Aggregation over a streaming source requires you to divide the unbounded stream into finite **windows**. Jet evaluates an aggregate function over each window and emits the result when the window closes.
+
+## Event time vs. processing time
+
+Jet supports two notions of time for windowing:
+
+| Time | Meaning |
+|---|---|
+| **Event time** | The timestamp embedded in the event itself — the time the event actually occurred |
+| **Processing time** (ingestion time) | The time the event arrived at the Jet source — assigned by the system clock |
+
+Event time is generally preferred for analytics because it produces deterministic results regardless of delays or restarts. Use `withTimestamps()` on your source stage to extract the event timestamp and specify the maximum expected lag:
+
+```java
+StreamStage<OrderEvent> stream = pipeline
+        .readFrom(Sources.mapJournal("orders", JournalInitialPosition.START_FROM_CURRENT))
+        .withTimestamps(entry -> entry.getValue().getTimestamp(), 5_000); // 5 s max lag
+```
+
+Use `withIngestionTimestamps()` when events do not carry a reliable timestamp and processing time is acceptable:
+
+```java
+StreamStage<String> stream = pipeline
+        .readFrom(Sources.socket("localhost", 9999))
+        .withIngestionTimestamps();
+```
+
+## Watermarks and allowed lag
+
+Jet uses **watermarks** to decide when to close a window. A watermark with value `T` means "no event with a timestamp earlier than `T` is expected to arrive." When the watermark advances past the end of a window, Jet closes that window and emits its result.
+
+The `maxLag` parameter in `withTimestamps()` controls how far behind the current watermark an event can arrive and still be included in its window. Set it high enough to account for out-of-order delivery, but low enough to keep latency acceptable.
+
+<Warning>
+Events that arrive after the watermark has already passed their window's end are dropped by default. Choose `maxLag` carefully to avoid silently discarding late data.
+</Warning>
+
+## Window types
+
+### Tumbling window
+
+A tumbling window divides the stream into fixed-size, non-overlapping intervals. Every event belongs to exactly one window.
+
+```java
+WindowDefinition window = WindowDefinition.tumbling(TimeUnit.MINUTES.toMillis(1));
+```
+
+For example, with a 2-millisecond window and timestamps `[0, 1, 2, 3, 4, 5, 6]`, the groups are `[0, 1]`, `[2, 3]`, `[4, 5]`, `[6]`.
+
+---
+
+### Sliding window
+
+A sliding window has a fixed size but advances by a smaller step, so windows overlap. An event may belong to multiple windows.
+
+```java
+WindowDefinition window = WindowDefinition.sliding(
+        TimeUnit.MINUTES.toMillis(5),  // window size: 5 minutes
+        TimeUnit.MINUTES.toMillis(1)); // slide step: 1 minute
+```
+
+`windowSize` must be an integer multiple of `slideBy`.
+
+A sliding window where `windowSize == slideBy` is equivalent to a tumbling window.
+
+---
+
+### Session window
+
+A session window groups events based on activity gaps. It stays open as long as events keep arriving within a given timeout and closes when no event arrives for longer than the timeout.
+
+```java
+WindowDefinition window = WindowDefinition.session(TimeUnit.MINUTES.toMillis(30));
+```
+
+For example, with a 2-millisecond session timeout and timestamps `[0, 1, 4, 8, 9, 10, 15]`, the groups are `[0, 1]`, `[4]`, `[8, 9, 10]`, `[15]`.
+
+Session windows are variable in size and well-suited for user-activity analysis.
+
+---
+
+### Early results
+
+All window types support emitting partial results before the window closes:
+
+```java
+WindowDefinition window = WindowDefinition.tumbling(TimeUnit.MINUTES.toMillis(1))
+        .setEarlyResultsPeriod(TimeUnit.SECONDS.toMillis(5));
+```
+
+With this setting, Jet emits a preliminary aggregate every 5 seconds in addition to the final result when the window closes.
+
+## Applying a window to a stage
+
+Call `.window()` on a `StreamStage` to attach a window definition:
+
+```java
+StageWithWindow<OrderEvent> windowed = stream.window(window);
+```
+
+## Aggregation functions
+
+The `AggregateOperations` class provides ready-made aggregation functions:
+
+| Operation | Method |
+|---|---|
+| Count items | `AggregateOperations.counting()` |
+| Sum longs | `AggregateOperations.summingLong(fn)` |
+| Average doubles | `AggregateOperations.averagingDouble(fn)` |
+| Collect to list | `AggregateOperations.toList()` |
+| Collect to set | `AggregateOperations.toSet()` |
+| Min / max | `AggregateOperations.minBy(comparator)` / `maxBy(comparator)` |
+
+## Grouping with a key
+
+Call `groupingKey()` before `aggregate()` to compute per-key aggregates inside each window:
+
+```java
+StreamStageWithKey<OrderEvent, String> keyed = stream.groupingKey(OrderEvent::getProductId);
+```
+
+## Complete example — per-product sales totals
+
+The following pipeline reads order events from an IMap journal, computes the total sales per product in 1-minute tumbling windows, and writes the results to an IMap.
+
+```java
+import com.hazelcast.jet.aggregate.AggregateOperations;
+import com.hazelcast.jet.pipeline.*;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+
+Pipeline pipeline = Pipeline.create();
+
+pipeline
+    .readFrom(Sources.mapJournal("orders", JournalInitialPosition.START_FROM_CURRENT))
+    // Extract event timestamp; allow up to 3 seconds of latency
+    .withTimestamps(entry -> entry.getValue().getTimestamp(), 3_000)
+    // Group by product ID within 1-minute tumbling windows
+    .groupingKey(entry -> entry.getValue().getProductId())
+    .window(WindowDefinition.tumbling(TimeUnit.MINUTES.toMillis(1)))
+    // Sum the order amounts
+    .aggregate(AggregateOperations.summingLong(entry -> entry.getValue().getAmount()))
+    // entry -> Map.Entry<productId, totalSales> keyed by window end time
+    .writeTo(Sinks.map("sales-per-minute"));
+```
+
+## Sliding window example — 5-minute rolling average
+
+```java
+pipeline
+    .readFrom(Sources.mapJournal("temperature-readings", JournalInitialPosition.START_FROM_CURRENT))
+    .withTimestamps(entry -> entry.getValue().getTimestamp(), 1_000)
+    .groupingKey(entry -> entry.getValue().getSensorId())
+    .window(WindowDefinition.sliding(
+            TimeUnit.MINUTES.toMillis(5),
+            TimeUnit.MINUTES.toMillis(1)))
+    .aggregate(AggregateOperations.averagingDouble(entry -> entry.getValue().getTemperature()))
+    .writeTo(Sinks.map("rolling-averages"));
+```
+
+## Session window example — user sessions
+
+```java
+pipeline
+    .readFrom(Sources.mapJournal("page-views", JournalInitialPosition.START_FROM_CURRENT))
+    .withTimestamps(entry -> entry.getValue().getTimestamp(), 2_000)
+    .groupingKey(entry -> entry.getValue().getUserId())
+    .window(WindowDefinition.session(TimeUnit.MINUTES.toMillis(30)))
+    .aggregate(AggregateOperations.counting())
+    .writeTo(Sinks.map("session-page-view-counts"));
+```

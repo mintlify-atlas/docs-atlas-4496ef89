@@ -1,0 +1,225 @@
+---
+title: "Java client"
+description: "Connect to a Hazelcast cluster from Java without running a full cluster member. The Java client gives you the same IMap, SQL, and Jet APIs as an embedded member but without storing data locally."
+---
+
+Hazelcast gives you two ways to interact with a cluster from Java:
+
+- **Embedded member** — your JVM joins the cluster as a full node. It stores partition data, participates in distribution, and communicates directly with other members. Use this when you want colocated compute or when the application itself is the cluster.
+- **Client** — your JVM connects to an existing cluster over TCP without storing any data locally. The cluster does all the work; the client sends requests and receives results. Use this for application servers, microservices, or any workload where you want to separate compute from storage.
+
+Both expose the same `HazelcastInstance` interface, so most code works without modification regardless of which mode you use.
+
+## Add the dependency
+
+The `hazelcast` jar contains both the member and the client. No additional artifact is needed.
+
+<CodeGroup>
+
+```xml Maven
+<dependency>
+  <groupId>com.hazelcast</groupId>
+  <artifactId>hazelcast</artifactId>
+  <version>5.5.0</version>
+</dependency>
+```
+
+```groovy Gradle
+implementation 'com.hazelcast:hazelcast:5.5.0'
+```
+
+</CodeGroup>
+
+## Set up a client
+
+<Steps>
+  <Step title="Build a ClientConfig">
+    Configure the cluster address and name. All other settings have sensible defaults.
+
+    ```java
+    import com.hazelcast.client.config.ClientConfig;
+
+    ClientConfig clientConfig = new ClientConfig();
+    clientConfig.getNetworkConfig().addAddress("localhost:5701");
+    clientConfig.setClusterName("dev");
+    ```
+
+    You can add multiple addresses — the client tries each one until it connects:
+
+    ```java
+    clientConfig.getNetworkConfig()
+        .addAddress("node1.example.com:5701")
+        .addAddress("node2.example.com:5701")
+        .addAddress("node3.example.com:5701");
+    ```
+  </Step>
+
+  <Step title="Create the client instance">
+    Pass the config to `HazelcastClient.newHazelcastClient()`. The call blocks until the client connects or throws an exception.
+
+    ```java
+    import com.hazelcast.client.HazelcastClient;
+    import com.hazelcast.core.HazelcastInstance;
+
+    HazelcastInstance client = HazelcastClient.newHazelcastClient(clientConfig);
+    ```
+
+    To use auto-discovery via a `hazelcast-client.xml` or `hazelcast-client.yaml` file on the classpath, call the no-arg form instead:
+
+    ```java
+    HazelcastInstance client = HazelcastClient.newHazelcastClient();
+    ```
+  </Step>
+
+  <Step title="Use the APIs">
+    The client exposes the same `IMap`, SQL, and Jet APIs as an embedded member.
+
+    ```java
+    import com.hazelcast.map.IMap;
+
+    IMap<String, String> map = client.getMap("my-map");
+    map.put("key", "value");
+    String value = map.get("key");
+
+    // SQL
+    try (SqlResult result = client.getSql().execute("SELECT * FROM \"my-map\"")) {
+        for (SqlRow row : result) {
+            System.out.println(row.getObject(0));
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="Shut down the client">
+    Always shut down the client when your application stops to release connections cleanly.
+
+    ```java
+    client.shutdown();
+    ```
+
+    To shut down all clients created in the current JVM at once:
+
+    ```java
+    HazelcastClient.shutdownAll();
+    ```
+  </Step>
+</Steps>
+
+## Configure ClientConfig
+
+### Cluster name
+
+The client only connects to clusters that share the same cluster name. The default is `dev`.
+
+```java
+clientConfig.setClusterName("my-cluster");
+```
+
+### Client name
+
+Give the client a human-readable name that appears in management tools and logs.
+
+```java
+clientConfig.setClientName("order-service-client");
+```
+
+### Cluster addresses
+
+Provide at least one reachable member address. The client uses these as seed addresses to discover the rest of the cluster.
+
+```java
+clientConfig.getNetworkConfig().addAddress("192.168.1.10:5701");
+```
+
+### Connection retry
+
+The client retries failed connection attempts using exponential backoff. You can tune the retry behavior with `ConnectionStrategyConfig`:
+
+```java
+import com.hazelcast.client.config.ClientConnectionStrategyConfig;
+import com.hazelcast.client.config.ConnectionRetryConfig;
+
+ConnectionRetryConfig retryConfig = new ConnectionRetryConfig();
+retryConfig.setInitialBackoffMillis(1000);   // start with 1 second
+retryConfig.setMaxBackoffMillis(30000);      // cap at 30 seconds
+retryConfig.setMultiplier(2.0);              // double each attempt
+retryConfig.setClusterConnectTimeoutMillis(120000); // give up after 2 minutes
+
+clientConfig.getConnectionStrategyConfig()
+    .setConnectionRetryConfig(retryConfig);
+```
+
+### Routing mode
+
+Hazelcast supports three routing modes. The default is `ALL_MEMBERS`.
+
+| Mode | Behavior |
+|---|---|
+| `ALL_MEMBERS` | Client connects to every member and routes requests directly to the partition owner (smart routing). Best latency, most connections. |
+| `MULTI_MEMBER` | Client connects to a configured subset of members based on a grouping strategy. |
+| `SINGLE_MEMBER` | Client connects to one member and sends all requests through it. Fewest connections, adds one extra network hop per request. |
+
+To switch to single-member mode:
+
+```java
+import com.hazelcast.client.config.ClusterRoutingConfig;
+import com.hazelcast.client.config.RoutingMode;
+
+clientConfig.getNetworkConfig()
+    .getClusterRoutingConfig()
+    .setRoutingMode(RoutingMode.SINGLE_MEMBER);
+```
+
+<Note>
+When using `ALL_MEMBERS` routing (the default), the client knows which member owns each partition and sends requests there directly, avoiding an extra hop. For SINGLE_MEMBER mode, the single connected member forwards the request to the correct owner on your behalf.
+</Note>
+
+## View connected clients from the member side
+
+From any cluster member, you can list all clients currently connected to it:
+
+```java
+import com.hazelcast.client.Client;
+import com.hazelcast.client.ClientService;
+
+HazelcastInstance hz = Hazelcast.newHazelcastInstance(); // the member
+ClientService clientService = hz.getClientService();
+
+for (Client connectedClient : clientService.getConnectedClients()) {
+    System.out.println("Client: " + connectedClient.getName()
+        + " UUID: " + connectedClient.getUuid()
+        + " Address: " + connectedClient.getSocketAddress());
+}
+```
+
+You can also add a `ClientListener` to react to client connect and disconnect events:
+
+```java
+clientService.addClientListener(new ClientListener() {
+    @Override
+    public void clientConnected(Client client) {
+        System.out.println("Connected: " + client.getName());
+    }
+
+    @Override
+    public void clientDisconnected(Client client) {
+        System.out.println("Disconnected: " + client.getName());
+    }
+});
+```
+
+## Reconnection behavior
+
+When a cluster member fails, the client automatically reconnects to another live member. In `ALL_MEMBERS` routing mode the client already has connections to all members, so failover is immediate. In `SINGLE_MEMBER` mode the client picks a new member from its address list and reconnects.
+
+During the reconnection window, operations throw `HazelcastClientOfflineException`. You can configure how long the client waits before giving up entirely via `clusterConnectTimeoutMillis` in `ConnectionRetryConfig`.
+
+<Warning>
+If the entire cluster goes down, the client cannot reconnect automatically. Your application must handle `HazelcastClientOfflineException` and retry if the cluster is expected to come back.
+</Warning>
+
+## Serialization compatibility
+
+<Note>
+The client and the cluster members must use the same serialization configuration. If you register custom serializers, compact schemas, or portable factories in your `ClientConfig`, register identical configurations in the member's `Config`. Mismatches cause `SerializationException` at runtime.
+</Note>

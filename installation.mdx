@@ -1,0 +1,165 @@
+---
+title: "Installation"
+description: "Install Hazelcast using Maven, Gradle, Docker, or build it from source."
+---
+
+Hazelcast is distributed as a Java library published to Maven Central. You can also run it as a Docker container or build it from the source repository.
+
+## Requirements
+
+<Info>
+  Hazelcast requires **JDK 17 or later**. This applies to both member (server) nodes and any application that embeds Hazelcast as a library.
+</Info>
+
+## Member vs. client dependencies
+
+Hazelcast has two primary runtime roles:
+
+- **Member** — a cluster node that stores data and runs Jet jobs. Use the `hazelcast` artifact.
+- **Client** — a thin client that connects to a remote cluster. Use the `hazelcast` artifact with the client API (`HazelcastClient`), or a language-specific client for Python, Node.js, .NET, C++, or Go.
+
+Both roles are covered by the same `com.hazelcast:hazelcast` JAR.
+
+<Note>
+  To run SQL queries **on a member** (not just from a client), add the `hazelcast-sql` module to the member's classpath. Clients connecting to a cluster that already has `hazelcast-sql` loaded do not need to add it themselves.
+</Note>
+
+## Maven
+
+Add the following to your `pom.xml`:
+
+<Tabs>
+  <Tab title="Member only">
+
+```xml
+<dependency>
+    <groupId>com.hazelcast</groupId>
+    <artifactId>hazelcast</artifactId>
+    <version>5.5.0</version>
+</dependency>
+```
+
+  </Tab>
+  <Tab title="Member + SQL">
+
+```xml
+<dependency>
+    <groupId>com.hazelcast</groupId>
+    <artifactId>hazelcast</artifactId>
+    <version>5.5.0</version>
+</dependency>
+<dependency>
+    <groupId>com.hazelcast</groupId>
+    <artifactId>hazelcast-sql</artifactId>
+    <version>5.5.0</version>
+</dependency>
+```
+
+  </Tab>
+</Tabs>
+
+## Gradle
+
+Add the following to your `build.gradle` or `build.gradle.kts`:
+
+<Tabs>
+  <Tab title="Groovy DSL">
+
+```gradle
+dependencies {
+    // Member
+    implementation 'com.hazelcast:hazelcast:5.5.0'
+
+    // Add this to enable SQL on a member
+    implementation 'com.hazelcast:hazelcast-sql:5.5.0'
+}
+```
+
+  </Tab>
+  <Tab title="Kotlin DSL">
+
+```kotlin
+dependencies {
+    // Member
+    implementation("com.hazelcast:hazelcast:5.5.0")
+
+    // Add this to enable SQL on a member
+    implementation("com.hazelcast:hazelcast-sql:5.5.0")
+}
+```
+
+  </Tab>
+</Tabs>
+
+## Docker
+
+You can run a standalone Hazelcast member using the official Docker image:
+
+```bash
+docker run hazelcast/hazelcast
+```
+
+To run a specific version:
+
+```bash
+docker run hazelcast/hazelcast:5.5.0
+```
+
+To expose the default member port and set a cluster name:
+
+```bash
+docker run \
+  -p 5701:5701 \
+  -e HZ_CLUSTERNAME=dev \
+  hazelcast/hazelcast:5.5.0
+```
+
+When the member starts, you will see the cluster topology in the logs:
+
+```
+Members {size:1, ver:1} [
+    Member [172.17.0.2]:5701 - <uuid> this
+]
+```
+
+<Tip>
+  Use [Hazelcast Management Center](https://hub.docker.com/r/hazelcast/management-center) to monitor and manage your cluster from a web UI.
+</Tip>
+
+## Build from source
+
+Building from source requires JDK 17 or later and the included Maven wrapper.
+
+```bash
+git clone https://github.com/hazelcast/hazelcast.git
+cd hazelcast
+./mvnw clean package -DskipTests
+```
+
+For faster local builds that skip tests, checkstyle, javadoc, and the `extensions` and `distribution` modules, use the `quick` profile:
+
+```bash
+./mvnw clean package -Dquick
+```
+
+The built JARs are placed in the `target/` directories of each module.
+
+<Note>
+  It is recommended to use the included `./mvnw` wrapper script. This ensures you use the same Maven version as the project's CI pipeline. You can also use a locally installed Maven distribution with the same version specified in `.mvn/wrapper/maven-wrapper.properties`.
+</Note>
+
+## Version selection
+
+Hazelcast follows semantic versioning. Choose a version based on your needs:
+
+| Version | Status | Notes |
+|---|---|---|
+| 5.5.x | Stable | Recommended for new projects |
+| 5.4.x | Stable | Previous release |
+| 5.8.0-SNAPSHOT | Development | Latest unreleased changes; built from `master` |
+
+<Warning>
+  SNAPSHOT versions are built from the development branch and may contain breaking changes or unstable behavior. Do not use them in production.
+</Warning>
+
+Check [Maven Central](https://central.sonatype.com/artifact/com.hazelcast/hazelcast) for the full list of published releases.

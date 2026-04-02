@@ -1,122 +1,112 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "Hazelcast",
+  "theme": "aspen",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#ecf4fc",
+    "light": "#b4fa07",
+    "dark": "#1e3d16"
   },
-  "favicon": "/favicon.svg",
+  "favicon": "https://media.brand.dev/edb3f3c8-fb1c-4d3d-86df-f15695110c65.jpg",
+  "logo": {
+    "light": "https://media.brand.dev/36661ad5-c510-4ed5-a9f0-781355447dbc.svg",
+    "dark": "https://media.brand.dev/36661ad5-c510-4ed5-a9f0-781355447dbc.svg"
+  },
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/hazelcast/hazelcast"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/hazelcast/hazelcast"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Get Started",
             "pages": [
-              "index",
+              "introduction",
               "quickstart",
-              "development"
+              "installation"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Core Concepts",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "concepts/distributed-data-structures",
+              "concepts/clustering",
+              "concepts/partitioning-and-replication"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "Data Structures",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "data-structures/imap",
+              "data-structures/replicated-map",
+              "data-structures/multimap",
+              "data-structures/queue-topic-ringbuffer",
+              "data-structures/cp-subsystem"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Stream Processing",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "stream-processing/overview",
+              "stream-processing/pipelines",
+              "stream-processing/sources-and-sinks",
+              "stream-processing/windowing-and-aggregation",
+              "stream-processing/fault-tolerance"
+            ]
+          },
+          {
+            "group": "SQL",
+            "pages": [
+              "sql/overview",
+              "sql/querying-maps",
+              "sql/streaming-queries"
+            ]
+          },
+          {
+            "group": "Configuration & Operations",
+            "pages": [
+              "operations/configuration",
+              "operations/security",
+              "operations/wan-replication",
+              "operations/persistence",
+              "operations/monitoring"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "API Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Java API",
             "pages": [
-              "api-reference/introduction"
+              "api/hazelcast-instance",
+              "api/imap",
+              "api/sql-service",
+              "api/jet-service",
+              "api/pipeline",
+              "api/sources-and-sinks"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Client Libraries",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "api/java-client",
+              "api/other-clients"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

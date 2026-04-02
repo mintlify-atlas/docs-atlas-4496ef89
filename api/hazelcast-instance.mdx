@@ -1,0 +1,280 @@
+---
+title: "HazelcastInstance"
+description: "The central interface for all Hazelcast operations. Every distributed data structure, service, and cluster operation is accessed through a HazelcastInstance."
+---
+
+`HazelcastInstance` is the entry point for all Hazelcast functionality. Each instance represents a member or client in a Hazelcast cluster and holds its own socket and thread pool. You must shut down instances explicitly when you are done with them.
+
+## Creating an instance
+
+<CodeGroup>
+
+```java Default configuration
+import com.hazelcast.core.Hazelcast;
+import com.hazelcast.core.HazelcastInstance;
+
+HazelcastInstance hz = Hazelcast.newHazelcastInstance();
+```
+
+```java Custom configuration
+import com.hazelcast.config.Config;
+import com.hazelcast.core.Hazelcast;
+import com.hazelcast.core.HazelcastInstance;
+
+Config config = new Config();
+config.setClusterName("my-cluster");
+config.getNetworkConfig().setPort(5701);
+
+HazelcastInstance hz = Hazelcast.newHazelcastInstance(config);
+```
+
+</CodeGroup>
+
+<Warning>
+Multiple `HazelcastInstance` objects can run on a single JVM. Each one forms or joins a cluster independently. Always call `shutdown()` when you no longer need an instance; otherwise the instance and its threads remain active.
+</Warning>
+
+## Distributed data structure accessors
+
+These methods return existing distributed objects by name, or create them if they do not exist yet.
+
+<AccordionGroup>
+
+<Accordion title="Map and map variants">
+
+<ResponseField name="getMap(String name)" type="IMap&lt;K, V&gt;">
+  Returns the distributed map with the given name. The map is backed by all cluster members and supports standard `ConcurrentMap` operations plus Hazelcast-specific extensions such as entry processors, predicates, and event listeners.
+
+  ```java
+  IMap<String, Order> orders = hz.getMap("orders");
+  orders.put("ORD-001", new Order("Widget", 5));
+  Order o = orders.get("ORD-001");
+  ```
+</ResponseField>
+
+<ResponseField name="getReplicatedMap(String name)" type="ReplicatedMap&lt;K, V&gt;">
+  Returns a `ReplicatedMap` that stores a full copy of all entries on every cluster member. Read operations are always local; writes propagate asynchronously.
+
+  ```java
+  ReplicatedMap<String, String> ref = hz.getReplicatedMap("country-codes");
+  ref.put("US", "United States");
+  String name = ref.get("US"); // always local
+  ```
+</ResponseField>
+
+<ResponseField name="getMultiMap(String name)" type="MultiMap&lt;K, V&gt;">
+  Returns a distributed multimap that allows multiple values per key.
+
+  ```java
+  MultiMap<String, String> tags = hz.getMultiMap("item-tags");
+  tags.put("item-1", "electronics");
+  tags.put("item-1", "sale");
+  ```
+</ResponseField>
+
+<ResponseField name="getRingbuffer(String name)" type="Ringbuffer&lt;E&gt;">
+  Returns a distributed ringbuffer, useful for streaming data between producers and consumers with a bounded capacity.
+
+  ```java
+  Ringbuffer<String> buffer = hz.getRingbuffer("events");
+  long seq = buffer.add("event-payload");
+  ```
+</ResponseField>
+
+</Accordion>
+
+<Accordion title="Collection types">
+
+<ResponseField name="getQueue(String name)" type="IQueue&lt;E&gt;">
+  Returns a distributed blocking queue. Implements `java.util.concurrent.BlockingQueue`.
+
+  ```java
+  IQueue<String> queue = hz.getQueue("task-queue");
+  queue.offer("task-1");
+  String task = queue.poll();
+  ```
+</ResponseField>
+
+<ResponseField name="getSet(String name)" type="ISet&lt;E&gt;">
+  Returns a distributed set. Implements `java.util.Set`.
+
+  ```java
+  ISet<String> active = hz.getSet("active-users");
+  active.add("user-42");
+  ```
+</ResponseField>
+
+<ResponseField name="getList(String name)" type="IList&lt;E&gt;">
+  Returns a distributed list. Index-based operations are not supported on the distributed list.
+
+  ```java
+  IList<String> log = hz.getList("audit-log");
+  log.add("User logged in");
+  ```
+</ResponseField>
+
+</Accordion>
+
+<Accordion title="Messaging">
+
+<ResponseField name="getTopic(String name)" type="ITopic&lt;E&gt;">
+  Returns a distributed publish/subscribe topic.
+
+  ```java
+  ITopic<String> topic = hz.getTopic("notifications");
+  topic.addMessageListener(msg -> System.out.println(msg.getMessageObject()));
+  topic.publish("Hello, cluster!");
+  ```
+</ResponseField>
+
+<ResponseField name="getReliableTopic(String name)" type="ITopic&lt;E&gt;">
+  Returns a reliable topic backed by a `Ringbuffer`. Unlike the regular topic, it retains messages so that slow or briefly disconnected subscribers can catch up.
+</ResponseField>
+
+</Accordion>
+
+<Accordion title="Services">
+
+<ResponseField name="getSql()" type="SqlService">
+  Returns the SQL service for executing distributed SQL queries across IMaps and other connectors.
+
+  ```java
+  SqlService sql = hz.getSql();
+  try (SqlResult result = sql.execute("SELECT * FROM orders WHERE status = ?", "PENDING")) {
+      for (SqlRow row : result) {
+          System.out.println(row.getObject("orderId"));
+      }
+  }
+  ```
+
+  See [SqlService API](/api/sql-service) for the full reference.
+</ResponseField>
+
+<ResponseField name="getJet()" type="JetService">
+  Returns the Jet service for submitting distributed batch and streaming pipeline jobs.
+
+  ```java
+  JetService jet = hz.getJet();
+  Pipeline p = Pipeline.create();
+  // build pipeline ...
+  Job job = jet.newJob(p);
+  job.join();
+  ```
+
+  See [JetService API](/api/jet-service) for the full reference.
+</ResponseField>
+
+<ResponseField name="getCPSubsystem()" type="CPSubsystem">
+  Returns the CP subsystem, which provides linearizable, CP-consistent data structures such as `FencedLock`, `ISemaphore`, and `IAtomicLong`.
+
+  ```java
+  CPSubsystem cp = hz.getCPSubsystem();
+  IAtomicLong counter = cp.getAtomicLong("request-count");
+  counter.incrementAndGet();
+  ```
+</ResponseField>
+
+<ResponseField name="getDataConnectionService()" type="DataConnectionService">
+  Returns the `DataConnectionService` for accessing named data connections configured via `DataConnectionConfig` or the SQL `CREATE DATA CONNECTION` command. Used primarily in Jet processors and pipeline code to share pooled connections to external systems.
+
+  ```java
+  DataConnectionService dcs = hz.getDataConnectionService();
+  JdbcDataConnection jdbc = dcs.getAndRetainDataConnection("my-db", JdbcDataConnection.class);
+  try {
+      // use jdbc.getConnection()...
+  } finally {
+      jdbc.release();
+  }
+  ```
+</ResponseField>
+
+</Accordion>
+
+<Accordion title="Cluster and identity">
+
+<ResponseField name="getCluster()" type="Cluster">
+  Returns the `Cluster` object, which lets you inspect cluster membership and add membership listeners.
+
+  ```java
+  Cluster cluster = hz.getCluster();
+  Set<Member> members = cluster.getMembers();
+  System.out.println("Cluster size: " + members.size());
+  ```
+</ResponseField>
+
+<ResponseField name="getLocalEndpoint()" type="Endpoint">
+  Returns the local endpoint. For cluster members this is a `Member`; for Hazelcast clients it is a `Client` object.
+</ResponseField>
+
+<ResponseField name="getName()" type="String">
+  Returns the name of this Hazelcast instance as configured.
+</ResponseField>
+
+<ResponseField name="getConfig()" type="Config">
+  Returns the configuration object this instance was started with.
+
+  ```java
+  Config config = hz.getConfig();
+  System.out.println("Cluster name: " + config.getClusterName());
+  ```
+</ResponseField>
+
+</Accordion>
+
+</AccordionGroup>
+
+## Lifecycle
+
+<ResponseField name="shutdown()" type="void">
+  Gracefully shuts down this `HazelcastInstance`. It disconnects from the cluster, stops all background threads, and releases all sockets and resources.
+
+  ```java
+  hz.shutdown();
+  ```
+</ResponseField>
+
+<Note>
+In client mode, if you do not call `shutdown()` explicitly, the client continues running and will reconnect to another member if the one it was connected to fails.
+</Note>
+
+## Complete example
+
+```java
+import com.hazelcast.config.Config;
+import com.hazelcast.core.Hazelcast;
+import com.hazelcast.core.HazelcastInstance;
+import com.hazelcast.map.IMap;
+import com.hazelcast.sql.SqlResult;
+import com.hazelcast.sql.SqlRow;
+import com.hazelcast.sql.SqlService;
+
+public class HazelcastDemo {
+
+    public static void main(String[] args) {
+        // Start an instance with custom config
+        Config config = new Config();
+        config.setClusterName("demo-cluster");
+        HazelcastInstance hz = Hazelcast.newHazelcastInstance(config);
+
+        // Work with an IMap
+        IMap<String, String> capitals = hz.getMap("capitals");
+        capitals.put("France", "Paris");
+        capitals.put("Germany", "Berlin");
+        System.out.println("France: " + capitals.get("France"));
+
+        // Run a SQL query
+        SqlService sql = hz.getSql();
+        try (SqlResult result = sql.execute("SELECT __key, this FROM capitals")) {
+            for (SqlRow row : result) {
+                System.out.println(row.getObject(0) + " -> " + row.getObject(1));
+            }
+        }
+
+        // Inspect the cluster
+        System.out.println("Members: " + hz.getCluster().getMembers().size());
+
+        // Shut down cleanly
+        hz.shutdown();
+    }
+}
+```

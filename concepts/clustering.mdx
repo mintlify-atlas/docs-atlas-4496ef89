@@ -1,0 +1,241 @@
+---
+title: "Clustering"
+description: "How Hazelcast forms peer-to-peer clusters, how members discover each other, and how to inspect and change cluster state."
+keywords: ["clustering", "cluster", "members", "discovery", "cluster state", "peer-to-peer", "membership", "ClusterState"]
+---
+
+A Hazelcast cluster is a network of nodes — called **members** — that cooperate to store and process data. There is no single master: every member holds a portion of the data, participates in coordination, and can serve client requests. The oldest member (the first in the ordered member list) acts as a coordinator for partition assignments, but any member can take over that role if the current coordinator leaves.
+
+## Peer-to-peer model
+
+Unlike primary/secondary architectures, every Hazelcast member runs the same code and carries the same responsibilities. This means:
+
+- No single point of failure for cluster management.
+- Adding members increases both capacity and throughput linearly.
+- Removing members triggers automatic rebalancing so that data remains accessible.
+
+The first member in `cluster.getMembers()` (ordered by join time) is referred to as the *master* member internally. You can obtain it programmatically:
+
+```java
+HazelcastInstance hz = Hazelcast.newHazelcastInstance();
+Cluster cluster = hz.getCluster();
+
+Member master = cluster.getMembers().iterator().next();
+System.out.println("Master member: " + master.getAddress());
+```
+
+## Members and clients
+
+Hazelcast distinguishes two types of participants:
+
+- **Member** (`com.hazelcast.cluster.Member`): a full cluster node that owns partitions and participates in data operations. You start a member by creating a `HazelcastInstance` with a server configuration.
+- **Client**: a lightweight process that connects to the cluster over a client protocol. Clients do not own partitions and do not appear in `cluster.getMembers()`. They are typically application processes that read and write data.
+
+A special case is the **lite member**: a member that joins the cluster and participates in cluster events, but does not own any partitions. Lite members can be promoted to data members at runtime:
+
+```java
+// Promote this lite member to a data member
+hz.getCluster().promoteLocalLiteMember();
+```
+
+### Inspecting members
+
+The `Cluster` interface gives you access to the current member set and the local member's identity:
+
+```java
+Cluster cluster = hz.getCluster();
+
+// All members in join-time order
+Set<Member> members = cluster.getMembers();
+for (Member member : members) {
+    System.out.println(member.getUuid() + " @ " + member.getAddress()
+        + (member.isLiteMember() ? " [lite]" : ""));
+}
+
+// This member (not available on clients)
+Member local = cluster.getLocalMember();
+System.out.println("Local member version: " + local.getVersion());
+```
+
+### Listening for membership changes
+
+Register a `MembershipListener` to react when members join or leave:
+
+```java
+UUID registrationId = cluster.addMembershipListener(new MembershipAdapter() {
+    @Override
+    public void memberAdded(MembershipEvent event) {
+        System.out.println("Member joined: " + event.getMember().getAddress());
+    }
+
+    @Override
+    public void memberRemoved(MembershipEvent event) {
+        System.out.println("Member left: " + event.getMember().getAddress());
+    }
+});
+
+// Later, to remove the listener:
+cluster.removeMembershipListener(registrationId);
+```
+
+## Member discovery
+
+Before members can form a cluster, they need to find each other. Hazelcast supports several discovery mechanisms.
+
+<Tabs>
+  <Tab title="Multicast">
+    Members broadcast UDP multicast packets on the local network. This works out of the box in LAN environments but is usually blocked in cloud or container networks.
+
+    ```xml
+    <hazelcast>
+      <network>
+        <join>
+          <multicast enabled="true">
+            <multicast-group>224.2.2.3</multicast-group>
+            <multicast-port>54327</multicast-port>
+          </multicast>
+        </join>
+      </network>
+    </hazelcast>
+    ```
+  </Tab>
+  <Tab title="TCP/IP">
+    Provide a static list of seed member addresses. Each member tries to connect to the listed addresses on startup and will discover additional members via the cluster protocol once it connects to at least one.
+
+    ```xml
+    <hazelcast>
+      <network>
+        <join>
+          <tcp-ip enabled="true">
+            <member>10.0.0.1:5701</member>
+            <member>10.0.0.2:5701</member>
+            <member>10.0.0.3:5701</member>
+          </tcp-ip>
+        </join>
+      </network>
+    </hazelcast>
+    ```
+  </Tab>
+  <Tab title="Kubernetes">
+    The Kubernetes discovery plugin uses the Kubernetes API to list pod addresses. Members discover each other by querying a service or namespace.
+
+    ```xml
+    <hazelcast>
+      <network>
+        <join>
+          <kubernetes enabled="true">
+            <namespace>default</namespace>
+            <service-name>hazelcast</service-name>
+          </kubernetes>
+        </join>
+      </network>
+    </hazelcast>
+    ```
+  </Tab>
+  <Tab title="AWS / GCP / Azure">
+    Cloud discovery plugins use provider APIs to enumerate running instances or VMs. Enable the appropriate plugin and provide credentials or instance metadata permissions.
+
+    ```xml
+    <!-- AWS example -->
+    <hazelcast>
+      <network>
+        <join>
+          <aws enabled="true">
+            <region>us-east-1</region>
+            <tag-key>hazelcast-cluster</tag-key>
+            <tag-value>production</tag-value>
+          </aws>
+        </join>
+      </network>
+    </hazelcast>
+    ```
+  </Tab>
+</Tabs>
+
+## Cluster state
+
+The `ClusterState` enum controls what operations the cluster permits. You can query and change the cluster state transactionally from any member.
+
+```java
+ClusterState state = cluster.getClusterState();
+System.out.println("Current state: " + state);
+
+// Change state (member only — not available on clients)
+cluster.changeClusterState(ClusterState.NO_MIGRATION);
+```
+
+<Warning>
+Changing cluster state is a distributed two-phase transaction. If a membership change occurs while the transaction is in progress, the state change is rolled back with an `IllegalStateException`. There must also be no ongoing migrations when moving to `FROZEN` or `PASSIVE`.
+</Warning>
+
+The five possible states are:
+
+### ACTIVE
+
+The default state. All operations are allowed, including new member joins and partition migrations. The cluster operates without restriction.
+
+### NO_MIGRATION
+
+All data operations remain available, but partition rebalancing and backup replication are disabled. When a new member joins it will not be assigned partitions until the state returns to `ACTIVE`. When a member leaves, backup replicas are promoted to primary but missing backups are not recreated until rebalancing resumes.
+
+Use `NO_MIGRATION` when you want to perform maintenance without triggering a rebalance storm.
+
+### FROZEN
+
+New member joins are blocked (except for members that left while the cluster was already `FROZEN` or `PASSIVE`). The partition table is frozen: if a member leaves, its partition assignments are held in place until it rejoins or the state returns to `ACTIVE`. All data operations other than migrations continue normally.
+
+Hazelcast automatically transitions to `FROZEN` during split-brain merge to prevent conflicting partition assignments.
+
+### PASSIVE
+
+New member joins are blocked. All data operations except those explicitly annotated with `@AllowedDuringPassiveState` are rejected immediately. The partition table is frozen. Member nodes transition to `NodeState.PASSIVE`.
+
+`PASSIVE` is the state the cluster transitions through when shutting down cleanly:
+
+```java
+// Transitions to PASSIVE, then shuts down all members
+cluster.shutdown();
+```
+
+### IN_TRANSITION
+
+A transient, read-only indicator that a state change transaction is currently in progress. You cannot set this state explicitly. While `IN_TRANSITION`, new member joins and migrations are paused. If the transaction fails, the cluster returns to the previous state.
+
+```java
+// IN_TRANSITION is reported during a state change
+if (cluster.getClusterState() == ClusterState.IN_TRANSITION) {
+    // wait for the transition to complete
+}
+```
+
+## Cluster version
+
+The cluster version tracks the operating protocol version across rolling upgrades. It is separate from each member's codebase version. A newer member joining a cluster with an older protocol version runs in a compatibility mode until all old members have been replaced and the version is explicitly upgraded:
+
+```java
+Version clusterVersion = cluster.getClusterVersion();
+System.out.println("Cluster version: " + clusterVersion);
+
+// Upgrade after all members are on the new codebase
+cluster.changeClusterVersion(Version.of(5, 5));
+```
+
+## Cluster groups
+
+To run multiple independent clusters on the same network, configure each cluster with a unique cluster name. Members only join clusters with a matching name:
+
+```xml
+<hazelcast>
+  <cluster-name>production-cluster</cluster-name>
+</hazelcast>
+```
+
+Or programmatically:
+
+```java
+Config config = new Config();
+config.setClusterName("production-cluster");
+HazelcastInstance hz = Hazelcast.newHazelcastInstance(config);
+```
+
+Members configured with different cluster names will not join each other, even if they are on the same host or subnet.

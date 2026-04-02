@@ -1,0 +1,537 @@
+---
+title: "Sources and Sinks API"
+description: "Reference for Hazelcast Jet's built-in Sources and Sinks. Covers IMap, ICache, IList, JDBC, files, socket, Kafka, JMS, Observable, and more."
+---
+
+`Sources` and `Sinks` are factory classes that provide built-in connectors for Jet pipelines. Pass a `BatchSource` or `StreamSource` to `Pipeline.readFrom(...)` to start a pipeline, and pass a `Sink` to `stage.writeTo(...)` to terminate one.
+
+<Tabs>
+  <Tab title="Sources">
+
+  ## Batch sources
+
+  Batch sources read a bounded dataset and signal completion when done.
+
+  <AccordionGroup>
+
+  <Accordion title="IMap sources">
+
+  ```java
+  static <K, V> BatchSource<Map.Entry<K, V>> Sources.map(String mapName)
+  ```
+  Reads all entries from a local `IMap` as `Map.Entry` pairs. Leverages data locality — each processor reads only the partitions stored on its member.
+
+  ```java
+  static <T, K, V> BatchSource<T> Sources.map(
+      String mapName,
+      Predicate<K, V> predicate,
+      Projection<? super Entry<K, V>, ? extends T> projection)
+  ```
+  Reads from a local `IMap` with server-side filtering and projection. Reduces data transferred before output is generated.
+
+  ```java
+  static <K, V> BatchSource<Map.Entry<K, V>> Sources.remoteMap(
+      String mapName,
+      ClientConfig clientConfig)
+  ```
+  Reads from an `IMap` on a remote Hazelcast cluster.
+
+  ```java
+  // Read all orders
+  BatchStage<Map.Entry<String, Order>> allOrders =
+      p.readFrom(Sources.map("orders"));
+
+  // Read with server-side filter and projection
+  BatchStage<String> orderIds = p.readFrom(Sources.map(
+      "orders",
+      Predicates.equal("status", "PENDING"),
+      Projections.singleAttribute("orderId")
+  ));
+  ```
+
+  </Accordion>
+
+  <Accordion title="ICache source">
+
+  ```java
+  static <K, V> BatchSource<Map.Entry<K, V>> Sources.cache(String cacheName)
+  ```
+  Reads all entries from a local `ICache` (JCache). Returns `Map.Entry` pairs.
+
+  ```java
+  BatchStage<Map.Entry<String, Product>> products =
+      p.readFrom(Sources.cache("product-cache"));
+  ```
+
+  </Accordion>
+
+  <Accordion title="IList source">
+
+  ```java
+  static <T> BatchSource<T> Sources.list(String listName)
+  ```
+  Reads all elements from a Hazelcast `IList`. Runs on a single member (where the list is stored).
+
+  ```java
+  BatchStage<String> items = p.readFrom(Sources.list("batch-items"));
+  ```
+
+  </Accordion>
+
+  <Accordion title="JDBC source">
+
+  ```java
+  static <T> BatchSource<T> Sources.jdbc(
+      String connectionURL,
+      String query,
+      FunctionEx<? super ResultSet, ? extends T> createOutputFn)
+  ```
+  Simple, single-query JDBC source. Runs on one member. Use when you do not need parallel reads.
+
+  ```java
+  static <T> BatchSource<T> Sources.jdbc(
+      SupplierEx<? extends Connection> newConnectionFn,
+      ToResultSetFunction resultSetFn,
+      FunctionEx<? super ResultSet, ? extends T> createOutputFn)
+  ```
+  Distributed JDBC source. `resultSetFn` receives the total parallelism and processor index so each worker can fetch its own slice (e.g., `WHERE MOD(id, ?) = ?`).
+
+  ```java
+  // Simple form — single query, one member
+  BatchStage<Person> people = p.readFrom(Sources.jdbc(
+      "jdbc:postgresql://localhost/mydb",
+      "SELECT id, name FROM person",
+      rs -> new Person(rs.getInt(1), rs.getString(2))
+  ));
+
+  // Distributed form — parallel queries
+  BatchStage<Person> peoplePar = p.readFrom(Sources.jdbc(
+      () -> DriverManager.getConnection(JDBC_URL),
+      (conn, parallelism, index) -> {
+          PreparedStatement stmt = conn.prepareStatement(
+              "SELECT id, name FROM person WHERE MOD(id, ?) = ?");
+          stmt.setInt(1, parallelism);
+          stmt.setInt(2, index);
+          return stmt.executeQuery();
+      },
+      rs -> new Person(rs.getInt(1), rs.getString(2))
+  ));
+  ```
+
+  </Accordion>
+
+  <Accordion title="File source (batch)">
+
+  ```java
+  static BatchSource<String> Sources.files(String directory)
+  ```
+  Reads all text files in the given directory, emitting one `String` per line. Each cluster member reads the files it finds locally. For a shared network filesystem, set `sharedFileSystem(true)` on `filesBuilder`.
+
+  ```java
+  BatchStage<String> lines = p.readFrom(Sources.files("/data/input"));
+  ```
+
+  Use `Sources.filesBuilder(directory)` for more control (charset, glob pattern, custom mapping function, shared filesystem flag).
+
+  </Accordion>
+
+  </AccordionGroup>
+
+  ## Streaming sources
+
+  Streaming sources emit data indefinitely and do not signal completion.
+
+  <AccordionGroup>
+
+  <Accordion title="IMap journal (change stream)">
+
+  ```java
+  static <K, V> StreamSource<Map.Entry<K, V>> Sources.mapJournal(
+      String mapName,
+      JournalInitialPosition initialPos)
+  ```
+  Streams `ADDED` and `UPDATED` events from the IMap event journal. Requires the event journal to be enabled in the IMap configuration.
+
+  `JournalInitialPosition` values:
+  - `START_FROM_OLDEST` — replay all events stored in the journal
+  - `START_FROM_CURRENT` — receive only future events
+
+  ```java
+  StreamStage<Map.Entry<String, Order>> orderChanges = p
+      .readFrom(Sources.mapJournal("orders", JournalInitialPosition.START_FROM_CURRENT))
+      .withIngestionTimestamps();
+  ```
+
+  </Accordion>
+
+  <Accordion title="Kafka source">
+
+  Kafka connector requires the `hazelcast-jet-kafka` module on the classpath.
+
+  ```java
+  // From the KafkaSources class (kafka connector module)
+  static <K, V> StreamSource<Map.Entry<K, V>> KafkaSources.kafka(
+      Properties consumerProperties,
+      String... topics)
+  ```
+
+  ```java
+  Properties props = new Properties();
+  props.setProperty("bootstrap.servers", "broker:9092");
+  props.setProperty("group.id", "jet-consumer");
+  props.setProperty("key.deserializer", StringDeserializer.class.getName());
+  props.setProperty("value.deserializer", StringDeserializer.class.getName());
+  props.setProperty("auto.offset.reset", "earliest");
+
+  StreamStage<Map.Entry<String, String>> kafkaEvents = p
+      .readFrom(KafkaSources.kafka(props, "orders-topic"))
+      .withNativeTimestamps(0);
+  ```
+
+  </Accordion>
+
+  <Accordion title="File watcher (streaming)">
+
+  ```java
+  static StreamSource<String> Sources.fileWatcher(String watchedDirectory)
+  ```
+  Watches a directory for new files and streams lines as they are appended. The source never completes.
+
+  ```java
+  StreamStage<String> newLines = p
+      .readFrom(Sources.fileWatcher("/var/log/app"))
+      .withIngestionTimestamps();
+  ```
+
+  </Accordion>
+
+  <Accordion title="TCP socket source">
+
+  ```java
+  static StreamSource<String> Sources.socket(String host, int port, Charset charset)
+  static StreamSource<String> Sources.socket(String host, int port)  // UTF-8
+  ```
+  Connects to a TCP socket and emits each line of text received. The source completes when the server closes the connection.
+
+  ```java
+  StreamStage<String> socketData = p
+      .readFrom(Sources.socket("data-server", 9999))
+      .withIngestionTimestamps();
+  ```
+
+  </Accordion>
+
+  <Accordion title="JMS queue and topic sources">
+
+  ```java
+  static StreamSource<Message> Sources.jmsQueue(
+      String queueName,
+      SupplierEx<? extends ConnectionFactory> factorySupplier)
+
+  static StreamSource<Message> Sources.jmsTopic(
+      String topicName,
+      SupplierEx<? extends ConnectionFactory> factorySupplier)
+  ```
+  Consume from a JMS queue (one message delivered to one consumer) or topic (broadcast). The `factorySupplier` must be stateless and serializable.
+
+  ```java
+  StreamStage<Message> jmsMessages = p
+      .readFrom(Sources.jmsQueue("order-queue", () -> new ActiveMQConnectionFactory("tcp://broker:61616")))
+      .withoutTimestamps();
+  ```
+
+  Use `Sources.jmsQueueBuilder(factorySupplier)` or `Sources.jmsTopicBuilder(factorySupplier)` for advanced options (projection, authentication, processing guarantee).
+
+  </Accordion>
+
+  </AccordionGroup>
+
+  </Tab>
+  <Tab title="Sinks">
+
+  ## Map and cache sinks
+
+  <AccordionGroup>
+
+  <Accordion title="IMap sink">
+
+  ```java
+  static <K, V> Sink<Map.Entry<K, V>> Sinks.map(String mapName)
+  ```
+  Writes `Map.Entry` items to a local `IMap`. Provides exactly-once via idempotent updates (same key overwrites, not appends).
+
+  ```java
+  static <T, K, V> Sink<T> Sinks.map(
+      String mapName,
+      FunctionEx<? super T, ? extends K> toKeyFn,
+      FunctionEx<? super T, ? extends V> toValueFn)
+  ```
+  Extracts key and value from any item type before writing.
+
+  ```java
+  static <K, V> Sink<Map.Entry<K, V>> Sinks.remoteMap(String mapName, ClientConfig clientConfig)
+  ```
+  Writes to an `IMap` on a remote cluster.
+
+  ```java
+  // Write Map.Entry items directly
+  stage.writeTo(Sinks.map("results"));
+
+  // Write custom objects with key/value extractors
+  stage.writeTo(Sinks.map("results", Order::getId, o -> o));
+  ```
+
+  </Accordion>
+
+  <Accordion title="IMap with merge">
+
+  ```java
+  static <T, K, V> Sink<T> Sinks.mapWithMerging(
+      String mapName,
+      FunctionEx<? super T, ? extends K> toKeyFn,
+      FunctionEx<? super T, ? extends V> toValueFn,
+      BinaryOperatorEx<V> mergeFn)
+  ```
+  Writes to an `IMap`, merging with the existing value when the key is already present. If `mergeFn` returns `null`, the key is removed. Not lock-aware.
+
+  ```java
+  // Sum quantities by product ID
+  stage.writeTo(Sinks.mapWithMerging(
+      "quantity-by-product",
+      item -> item.getProductId(),
+      item -> item.getQuantity(),
+      Integer::sum
+  ));
+  ```
+
+  </Accordion>
+
+  <Accordion title="ICache sink">
+
+  ```java
+  static <T extends Entry> Sink<T> Sinks.cache(String cacheName)
+  ```
+  Writes `Map.Entry` items to a Hazelcast `ICache` (JCache). Provides exactly-once via idempotent updates.
+
+  ```java
+  stage.writeTo(Sinks.cache("product-cache"));
+  ```
+
+  </Accordion>
+
+  <Accordion title="IList sink">
+
+  ```java
+  static <T> Sink<T> Sinks.list(String listName)
+  ```
+  Appends items to a Hazelcast `IList`. At-least-once — items may be duplicated on job restart.
+
+  ```java
+  stage.writeTo(Sinks.list("output-list"));
+  ```
+
+  </Accordion>
+
+  </AccordionGroup>
+
+  ## File and socket sinks
+
+  <AccordionGroup>
+
+  <Accordion title="File sink">
+
+  ```java
+  static <T> Sink<T> Sinks.files(String directoryName)
+  ```
+  Writes each item to a text file in the given directory. Each processor creates its own files (named with the processor's global index). Supports exactly-once via atomic rename when the job uses snapshotting.
+
+  ```java
+  stage.writeTo(Sinks.files("/data/output"));
+  ```
+
+  Use `Sinks.filesBuilder(directoryName)` for full control (charset, roll-by-date, roll-by-size, custom `toStringFn`, `exactlyOnce` toggle).
+
+  </Accordion>
+
+  <Accordion title="JDBC sink">
+
+  ```java
+  static <T> Sink<T> Sinks.jdbc(
+      String updateQuery,
+      SupplierEx<? extends CommonDataSource> dataSourceSupplier,
+      BiConsumerEx<PreparedStatement, T> bindFn)
+  ```
+  Executes the given parameterised SQL statement for each item, binding values using `bindFn`. Supports exactly-once via XA transactions when the job uses `EXACTLY_ONCE`.
+
+  ```java
+  stage.writeTo(Sinks.jdbc(
+      "INSERT INTO orders (id, item, qty) VALUES (?, ?, ?)",
+      () -> {
+          PGSimpleDataSource ds = new PGSimpleDataSource();
+          ds.setUrl("jdbc:postgresql://localhost/mydb");
+          return ds;
+      },
+      (stmt, order) -> {
+          stmt.setString(1, order.getId());
+          stmt.setString(2, order.getItem());
+          stmt.setInt(3, order.getQuantity());
+      }
+  ));
+  ```
+
+  Use `Sinks.jdbcBuilder()` for the full fluent API.
+
+  </Accordion>
+
+  </AccordionGroup>
+
+  ## Messaging sinks
+
+  <AccordionGroup>
+
+  <Accordion title="Kafka sink">
+
+  Kafka connector requires the `hazelcast-jet-kafka` module.
+
+  ```java
+  // From the KafkaSinks class (kafka connector module)
+  static <K, V> Sink<Map.Entry<K, V>> KafkaSinks.kafka(
+      Properties producerProperties,
+      String topic)
+  ```
+
+  ```java
+  Properties props = new Properties();
+  props.setProperty("bootstrap.servers", "broker:9092");
+  props.setProperty("key.serializer", StringSerializer.class.getName());
+  props.setProperty("value.serializer", StringSerializer.class.getName());
+
+  stage.writeTo(KafkaSinks.kafka(props, "processed-orders"));
+  ```
+
+  </Accordion>
+
+  <Accordion title="JMS queue and topic sinks">
+
+  ```java
+  static <T> Sink<T> Sinks.jmsQueue(
+      String queueName,
+      SupplierEx<ConnectionFactory> factorySupplier)
+
+  static <T> Sink<T> Sinks.jmsTopic(
+      String topicName,
+      SupplierEx<ConnectionFactory> factorySupplier)
+  ```
+  Publishes items to a JMS queue or topic. If the item is not a `jakarta.jms.Message`, it is wrapped in a `TextMessage` via `item.toString()`.
+
+  ```java
+  stage.writeTo(Sinks.jmsQueue(
+      "output-queue",
+      () -> new ActiveMQConnectionFactory("tcp://broker:61616")
+  ));
+  ```
+
+  </Accordion>
+
+  </AccordionGroup>
+
+  ## Diagnostic and utility sinks
+
+  <AccordionGroup>
+
+  <Accordion title="Logger sink">
+
+  ```java
+  static <T> Sink<T> Sinks.logger()
+  static <T> Sink<T> Sinks.logger(FunctionEx<? super T, String> toStringFn)
+  ```
+  Logs each item at INFO level to the cluster member's logger. Intended for development and debugging.
+
+  ```java
+  stage.writeTo(Sinks.logger(item -> "Processing: " + item));
+  ```
+
+  </Accordion>
+
+  <Accordion title="Observable sink">
+
+  ```java
+  static <T> Sink<T> Sinks.observable(String name)
+  static <T> Sink<T> Sinks.observable(Observable<? super T> observable)
+  ```
+  Streams results to the client via an `Observable`. Useful for collecting results in tests or interactive use.
+
+  ```java
+  Observable<String> obs = jet.newObservable();
+  CompletableFuture<List<String>> results = obs.toFuture(stream -> stream.collect(toList()));
+
+  pipeline.readFrom(Sources.list("input"))
+          .map(Object::toString)
+          .writeTo(Sinks.observable(obs));
+
+  jet.newJob(pipeline).join();
+  System.out.println(results.get());
+  obs.destroy();
+  ```
+
+  </Accordion>
+
+  <Accordion title="Noop sink">
+
+  ```java
+  static <T> Sink<T> Sinks.noop()
+  ```
+  Discards all items. Useful for benchmarking pipeline throughput without I/O overhead.
+
+  ```java
+  stage.writeTo(Sinks.noop());
+  ```
+
+  </Accordion>
+
+  </AccordionGroup>
+
+  </Tab>
+</Tabs>
+
+---
+
+## Complete example: IMap to IMap
+
+```java
+import com.hazelcast.jet.JetService;
+import com.hazelcast.jet.Job;
+import com.hazelcast.jet.pipeline.JournalInitialPosition;
+import com.hazelcast.jet.pipeline.Pipeline;
+import com.hazelcast.jet.pipeline.Sinks;
+import com.hazelcast.jet.pipeline.Sources;
+import com.hazelcast.jet.pipeline.WindowDefinition;
+import com.hazelcast.jet.aggregate.AggregateOperations;
+
+JetService jet = hz.getJet();
+
+// Batch: read all orders, count per status, write results
+Pipeline batch = Pipeline.create();
+batch.readFrom(Sources.map("orders"))
+     .map(Map.Entry::getValue)
+     .groupingKey(Order::getStatus)
+     .aggregate(AggregateOperations.counting())
+     .writeTo(Sinks.map(
+         "order-counts-by-status",
+         Map.Entry::getKey,
+         Map.Entry::getValue));
+
+jet.newJob(batch).join();
+System.out.println("Batch job done");
+
+// Streaming: tail the IMap journal, write updates to another map
+Pipeline stream = Pipeline.create();
+stream.readFrom(Sources.mapJournal("orders", JournalInitialPosition.START_FROM_CURRENT))
+      .withIngestionTimestamps()
+      .filter(e -> "PLACED".equals(e.getValue().getStatus()))
+      .writeTo(Sinks.map("new-placements"));
+
+Job streamJob = jet.newJob(stream);
+// streamJob.join() would block forever; cancel when done:
+// streamJob.cancel();
+```

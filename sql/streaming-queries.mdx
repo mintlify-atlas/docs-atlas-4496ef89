@@ -1,0 +1,192 @@
+---
+title: "Streaming SQL queries"
+description: "Run continuous SQL queries over Kafka topics and IMap change streams, including windowed aggregations with TUMBLE and HOP functions."
+keywords: ["sql", "streaming", "kafka", "watermark", "impose order", "tumble", "hop", "windowed aggregation", "jet", "pipeline"]
+---
+
+Hazelcast SQL supports streaming queries — queries that run continuously over an unbounded data source rather than returning a fixed result set. Streaming data sources include Kafka topics and IMap change streams (journal).
+
+Streaming queries run as long-lived Jet jobs. They continue processing until you cancel them or the query encounters an unrecoverable error.
+
+## Create a Kafka mapping
+
+Before querying a Kafka topic, create a mapping that describes the topic's key/value format and the broker address:
+
+```sql
+CREATE MAPPING kafka_orders (
+    order_id    BIGINT,
+    customer_id BIGINT,
+    total       DECIMAL
+)
+TYPE Kafka
+OPTIONS (
+    'keyFormat'        = 'bigint',
+    'valueFormat'      = 'json-flat',
+    'bootstrap.servers' = 'localhost:9092'
+)
+```
+
+You can create this mapping from Java:
+
+```java
+hz.getSql().execute(
+    "CREATE MAPPING IF NOT EXISTS kafka_orders (" +
+    "    order_id    BIGINT," +
+    "    customer_id BIGINT," +
+    "    total       DECIMAL" +
+    ") TYPE Kafka " +
+    "OPTIONS (" +
+    "    'keyFormat'         = 'bigint'," +
+    "    'valueFormat'       = 'json-flat'," +
+    "    'bootstrap.servers' = 'localhost:9092'" +
+    ")"
+);
+```
+
+## Simple streaming SELECT
+
+Once the mapping exists, you can query the Kafka topic with a regular `SELECT`. The query reads new records as they arrive:
+
+```sql
+SELECT order_id, customer_id, total
+FROM kafka_orders
+```
+
+```java
+try (SqlResult result = hz.getSql().execute(
+        "SELECT order_id, customer_id, total FROM kafka_orders")) {
+    for (SqlRow row : result) {
+        Long    orderId    = row.getObject("order_id");
+        Long    customerId = row.getObject("customer_id");
+        Object  total      = row.getObject("total");
+        System.out.printf("Order %d from customer %d: %s%n",
+                orderId, customerId, total);
+    }
+}
+```
+
+<Note>
+Unlike batch queries, this loop will not terminate on its own. The iterator blocks waiting for the next record. Cancel the query (close the `SqlResult`) when you are done.
+</Note>
+
+## Watermarking with IMPOSE_ORDER
+
+Windowed aggregations require the engine to know when a time window is complete. You signal this using `IMPOSE_ORDER`, which assigns a watermark based on a timestamp column.
+
+```sql
+SELECT order_id, customer_id, total
+FROM TABLE(IMPOSE_ORDER(
+    TABLE kafka_orders,
+    DESCRIPTOR(order_time),
+    INTERVAL '5' SECONDS
+))
+```
+
+<Warning>
+Streaming aggregations require `IMPOSE_ORDER` (or an equivalent watermark strategy). Without watermarking, windowed functions such as `TUMBLE` and `HOP` cannot determine when to emit results and the query will not produce output.
+</Warning>
+
+## Windowed aggregations
+
+### TUMBLE — fixed-size non-overlapping windows
+
+`TUMBLE` groups records into fixed-size, non-overlapping time windows:
+
+```sql
+SELECT
+    window_start,
+    window_end,
+    customer_id,
+    COUNT(*)   AS order_count,
+    SUM(total) AS revenue
+FROM TABLE(TUMBLE(
+    TABLE(IMPOSE_ORDER(
+        TABLE kafka_orders,
+        DESCRIPTOR(order_time),
+        INTERVAL '5' SECONDS
+    )),
+    DESCRIPTOR(order_time),
+    INTERVAL '1' MINUTE
+))
+GROUP BY window_start, window_end, customer_id
+```
+
+### HOP — sliding windows
+
+`HOP` creates overlapping windows. Each event can appear in multiple windows:
+
+```sql
+SELECT
+    window_start,
+    window_end,
+    COUNT(*)   AS order_count,
+    AVG(total) AS avg_order_value
+FROM TABLE(HOP(
+    TABLE(IMPOSE_ORDER(
+        TABLE kafka_orders,
+        DESCRIPTOR(order_time),
+        INTERVAL '5' SECONDS
+    )),
+    DESCRIPTOR(order_time),
+    INTERVAL '30' SECONDS,   -- slide (how often a new window starts)
+    INTERVAL '2' MINUTES     -- window size
+))
+GROUP BY window_start, window_end
+```
+
+## Continuous pipelines with INSERT INTO ... SELECT
+
+Use `INSERT INTO ... SELECT` to build a continuous pipeline that reads from one source and writes results to another (e.g., from Kafka to an IMap):
+
+```sql
+INSERT INTO high_value_orders
+SELECT order_id, customer_id, total
+FROM TABLE(IMPOSE_ORDER(
+    TABLE kafka_orders,
+    DESCRIPTOR(order_time),
+    INTERVAL '5' SECONDS
+))
+WHERE total > 1000
+```
+
+From Java, submit this as a fire-and-forget statement. The underlying Jet job continues running in the background:
+
+```java
+// Submit the pipeline — this returns immediately after the job is submitted.
+hz.getSql().execute(
+    "INSERT INTO high_value_orders " +
+    "SELECT order_id, customer_id, total " +
+    "FROM TABLE(IMPOSE_ORDER(" +
+    "    TABLE kafka_orders," +
+    "    DESCRIPTOR(order_time)," +
+    "    INTERVAL '5' SECONDS" +
+    ")) " +
+    "WHERE total > 1000"
+);
+```
+
+## Batch vs. streaming SqlResult
+
+The `SqlResult` API is the same for both batch and streaming queries, but the behaviour differs:
+
+| Behaviour | Batch query | Streaming query |
+| --------- | ----------- | --------------- |
+| Iterator terminates | Yes, when all rows are consumed | No, blocks indefinitely |
+| `isRowSet()` | `true` for SELECT | `true` |
+| `close()` | Releases resources | Cancels the running Jet job |
+
+Always close a streaming `SqlResult` explicitly — not doing so will leave the Jet job running on the cluster.
+
+```java
+SqlResult result = hz.getSql().execute("SELECT * FROM kafka_orders");
+try {
+    for (SqlRow row : result) {
+        // process row
+        if (shouldStop()) {
+            break; // exit early
+        }
+    }
+} finally {
+    result.close(); // cancels the Jet job
+}
+```

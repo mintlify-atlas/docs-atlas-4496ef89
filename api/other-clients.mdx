@@ -1,0 +1,210 @@
+---
+title: "Client libraries"
+description: "Hazelcast provides official client libraries for Python, Node.js, .NET, C++, and Go. All clients connect to the same cluster and expose the same core APIs: IMap, SQL, and Jet pipeline submission."
+---
+
+Hazelcast maintains official client libraries for multiple languages. Each library connects to a Hazelcast cluster over TCP and exposes the same core distributed data structures as the Java client. You can mix clients freely — a Python client and a Node.js client can read from and write to the same `IMap`.
+
+<Note>
+All clients support the same core APIs: IMap get/put/remove, SQL queries, and Jet pipeline submission. Feature availability beyond the core may vary by client version. Check each client's changelog for details.
+</Note>
+
+## Client libraries
+
+<Tabs>
+  <Tab title="Python">
+    **GitHub**: [hazelcast/hazelcast-python-client](https://github.com/hazelcast/hazelcast-python-client)
+
+    ### Installation
+
+    ```bash
+    pip install hazelcast-python-client
+    ```
+
+    ### Connect and use IMap
+
+    ```python
+    import hazelcast
+
+    # Connect to the cluster
+    client = hazelcast.HazelcastClient(cluster_members=["localhost:5701"])
+
+    # Get a distributed map
+    my_map = client.get_map("my-map").blocking()
+
+    # Put and get values
+    my_map.put("key", "value")
+    value = my_map.get("key")
+    print(value)  # "value"
+
+    # Shut down cleanly
+    client.shutdown()
+    ```
+  </Tab>
+
+  <Tab title="Node.js">
+    **GitHub**: [hazelcast/hazelcast-nodejs-client](https://github.com/hazelcast/hazelcast-nodejs-client)
+
+    ### Installation
+
+    ```bash
+    npm install hazelcast-client
+    ```
+
+    ### Connect and use IMap
+
+    ```javascript
+    const { Client } = require('hazelcast-client');
+
+    async function main() {
+        // Connect to the cluster
+        const client = await Client.newHazelcastClient({ clusterName: 'dev' });
+
+        // Get a distributed map
+        const map = await client.getMap('my-map');
+
+        // Put and get values
+        await map.put('key', 'value');
+        const value = await map.get('key');
+        console.log(value); // 'value'
+
+        // Shut down cleanly
+        await client.shutdown();
+    }
+
+    main().catch(console.error);
+    ```
+  </Tab>
+
+  <Tab title=".NET">
+    **GitHub**: [hazelcast/hazelcast-csharp-client](https://github.com/hazelcast/hazelcast-csharp-client)
+
+    ### Installation
+
+    ```bash
+    dotnet add package Hazelcast.Net
+    ```
+
+    ### Connect and use IMap
+
+    ```csharp
+    using Hazelcast;
+
+    // Build options (reads hazelcast.json or environment by default)
+    var options = new HazelcastOptionsBuilder().Build();
+
+    // Connect to the cluster — dispose to shut down
+    await using var client = await HazelcastClientFactory.StartNewClientAsync(options);
+
+    // Get a distributed map
+    var map = await client.GetMapAsync<string, string>("my-map");
+
+    // Put and get values
+    await map.PutAsync("key", "value");
+    var value = await map.GetAsync("key");
+    Console.WriteLine(value); // "value"
+    ```
+  </Tab>
+
+  <Tab title="C++">
+    **GitHub**: [hazelcast/hazelcast-cpp-client](https://github.com/hazelcast/hazelcast-cpp-client)
+
+    See the repository README for build and CMake integration instructions.
+
+    ### Connect and use IMap
+
+    ```cpp
+    #include <hazelcast/client/hazelcast_client.h>
+
+    int main() {
+        // Connect to the cluster with default config (localhost:5701)
+        hazelcast::client::ClientConfig config;
+        hazelcast::client::HazelcastClient hz(config);
+
+        // Get a distributed map
+        auto map = hz.getMap<std::string, std::string>("my-map");
+
+        // Put and get values
+        map->put("key", "value");
+        auto value = map->get("key").get();
+        std::cout << *value << std::endl; // "value"
+
+        return 0;
+    }
+    ```
+  </Tab>
+
+  <Tab title="Go">
+    **GitHub**: [hazelcast/hazelcast-go-client](https://github.com/hazelcast/hazelcast-go-client)
+
+    ### Installation
+
+    ```bash
+    go get github.com/hazelcast/hazelcast-go-client
+    ```
+
+    ### Connect and use IMap
+
+    ```go
+    package main
+
+    import (
+        "context"
+        "fmt"
+
+        "github.com/hazelcast/hazelcast-go-client"
+    )
+
+    func main() {
+        ctx := context.Background()
+
+        // Connect to the cluster with default config (localhost:5701)
+        client, err := hazelcast.StartNewClient(ctx)
+        if err != nil {
+            panic(err)
+        }
+        defer client.Shutdown(ctx)
+
+        // Get a distributed map
+        m, err := client.GetMap(ctx, "my-map")
+        if err != nil {
+            panic(err)
+        }
+
+        // Put and get values
+        m.Put(ctx, "key", "value")
+        value, _ := m.Get(ctx, "key")
+        fmt.Println(value) // "value"
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Feature comparison
+
+The table below summarizes which capabilities each client supports.
+
+| Feature | Java | Python | Node.js | .NET | C++ | Go |
+|---|---|---|---|---|---|---|
+| IMap | Yes | Yes | Yes | Yes | Yes | Yes |
+| SQL | Yes | Yes | Yes | Yes | Yes | Yes |
+| Jet pipeline submission | Yes | Yes | Yes | Yes | No | Yes |
+| Near cache | Yes | Yes | Yes | Yes | Yes | Yes |
+| SSL/TLS | Yes | Yes | Yes | Yes | Yes | Yes |
+| Compact serialization | Yes | Yes | Yes | Yes | Yes | Yes |
+| CP subsystem | Yes | Yes | Yes | Yes | No | Yes |
+
+<Note>
+Feature support varies by client version. Always check the client's release notes to confirm feature availability for your target version.
+</Note>
+
+## Additional resources
+
+<CardGroup cols={2}>
+  <Card title="Java client" icon="java" href="/api/java-client">
+    Full configuration reference for the Java client, including routing modes, reconnection, and lifecycle.
+  </Card>
+  <Card title="Hazelcast GitHub" icon="github" href="https://github.com/hazelcast">
+    Browse all official Hazelcast repositories, including client libraries and platform code.
+  </Card>
+</CardGroup>

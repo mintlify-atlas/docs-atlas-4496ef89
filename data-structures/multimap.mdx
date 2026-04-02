@@ -1,0 +1,145 @@
+---
+title: "MultiMap"
+description: "A distributed map that associates multiple values with each key. Supports set and list collection semantics per key, locking, and entry listeners."
+---
+
+`MultiMap` is a specialized distributed map that allows each key to be associated with **multiple values**. It is useful for one-to-many relationships where you would otherwise maintain a `Map<K, List<V>>` yourself.
+
+<Note>
+Like `IMap`, `MultiMap` uses the serialized byte form of keys for `hashCode` and `equals` comparisons, not the Java implementations. Returned collections are clones — changes to the collection are not reflected in the map, and vice versa.
+</Note>
+
+## Getting a MultiMap
+
+```java
+HazelcastInstance hz = Hazelcast.newHazelcastInstance();
+MultiMap<String, String> roles = hz.getMultiMap("user-roles");
+```
+
+## Basic operations
+
+```java
+// Add values — returns true if the map grew (false if duplicate in SET mode)
+roles.put("alice", "ADMIN");
+roles.put("alice", "USER");
+roles.put("bob", "USER");
+
+// Retrieve all values for a key — returns a collection clone
+Collection<String> aliceRoles = roles.get("alice");
+// ["ADMIN", "USER"]
+
+// Check key existence
+boolean hasAlice = roles.containsKey("alice");
+
+// Check whether a specific key-value pair exists
+boolean isAdmin = roles.containsEntry("alice", "ADMIN");
+
+// Check whether any key has this value
+boolean anyAdmin = roles.containsValue("ADMIN");
+
+// Number of key-value pairs (not distinct keys)
+int totalPairs = roles.size();
+
+// Distinct keys
+Set<String> users = roles.keySet();
+
+// Remove a specific key-value pair
+roles.remove("alice", "ADMIN");
+
+// Remove all values for a key
+Collection<String> removedRoles = roles.remove("bob");
+```
+
+## Collection type: set vs list
+
+By default, `MultiMap` stores values in a `Set` — duplicate values for the same key are silently discarded. You can switch to a `List` to allow duplicates:
+
+```xml
+<multimap name="user-roles">
+    <!-- SET (default) or LIST -->
+    <value-collection-type>SET</value-collection-type>
+</multimap>
+```
+
+| Type | Allows duplicates | Preserves insertion order |
+|---|---|---|
+| `SET` (default) | No | No |
+| `LIST` | Yes | Yes |
+
+<Warning>
+If you configure `LIST` and then put a `List` value into a `SET`-typed `MultiMap` (or vice versa), items may be silently dropped. There is no compile-time warning for this.
+</Warning>
+
+## Async bulk operations
+
+For high-throughput writes, use the async variants:
+
+```java
+// Async put of an entire collection for a key
+roles.putAllAsync("alice", List.of("ADMIN", "USER", "AUDITOR"))
+     .toCompletableFuture().get();
+
+// Async put of a full map at once
+Map<String, Collection<String>> bulk = Map.of(
+    "alice", List.of("ADMIN"),
+    "bob",   List.of("USER"));
+roles.putAllAsync(bulk).toCompletableFuture().get();
+```
+
+## Distributed locking
+
+`MultiMap` supports entry-level distributed locks, identical in semantics to `IMap` locking:
+
+```java
+roles.lock("alice");
+try {
+    roles.remove("alice", "ADMIN");
+    roles.put("alice", "READ_ONLY");
+} finally {
+    roles.unlock("alice");
+}
+
+// Try with timeout
+if (roles.tryLock("alice", 3, TimeUnit.SECONDS)) {
+    try {
+        // safe to mutate alice's roles
+    } finally {
+        roles.unlock("alice");
+    }
+}
+```
+
+## Event listeners
+
+```java
+UUID listenerId = roles.addEntryListener(new EntryAddedListener<String, String>() {
+    @Override
+    public void entryAdded(EntryEvent<String, String> event) {
+        System.out.println("Role added: " + event.getKey()
+            + " -> " + event.getValue());
+    }
+}, true); // true = include value in event payload
+
+// Listen on a specific key
+roles.addEntryListener(listener, "alice", true);
+
+// Remove
+roles.removeEntryListener(listenerId);
+```
+
+## Use cases
+
+<CardGroup cols={2}>
+  <Card title="User roles and permissions" icon="shield">
+    Map users to multiple roles without maintaining a `Map<String, List<String>>` manually.
+  </Card>
+  <Card title="Tag indexes" icon="tag">
+    Associate multiple tags or labels with an entity for fast tag-based lookups.
+  </Card>
+  <Card title="Session tracking" icon="clock">
+    Track multiple active sessions per user across distributed cluster members.
+  </Card>
+  <Card title="Graph adjacency" icon="git-branch">
+    Store edges in a directed graph — each source node key maps to a collection of destination nodes.
+  </Card>
+</CardGroup>

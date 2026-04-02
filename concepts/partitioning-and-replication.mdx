@@ -1,0 +1,253 @@
+---
+title: "Partitioning and replication"
+description: "How Hazelcast distributes data across 271 partitions, replicates it with synchronous and asynchronous backups, and recovers from member failures."
+keywords: ["partitioning", "replication", "backups", "consistent hashing", "partition migration", "near cache", "PartitionService", "MapConfig"]
+---
+
+Hazelcast distributes data across the cluster by splitting it into a fixed number of **partitions**. Each partition is owned by one member (the *primary*) and optionally replicated to one or more other members (*backups*). This design lets the cluster scale horizontally and recover from failures without any central coordinator.
+
+## The 271-partition model
+
+By default, Hazelcast uses **271 partitions**. This number is fixed at cluster startup and is shared by all distributed data structures. The partition count is intentionally a prime number to improve distribution uniformity.
+
+<Info>
+You can change the partition count with the `hazelcast.partition.count` cluster property before the cluster starts. Changing it after the cluster has formed requires a full restart.
+</Info>
+
+Each partition is identified by an integer from `0` to `partitionCount - 1`. The `Partition` interface exposes the partition ID and its current owner:
+
+```java
+PartitionService ps = hz.getPartitionService();
+
+// Find which partition a key belongs to
+Partition partition = ps.getPartition("order-1");
+System.out.println("Partition ID: " + partition.getPartitionId());
+System.out.println("Owner: " + partition.getOwner().getAddress());
+
+// Iterate all partitions
+for (Partition p : ps.getPartitions()) {
+    System.out.println("Partition " + p.getPartitionId()
+        + " owned by " + p.getOwner());
+}
+```
+
+## How data is mapped to partitions
+
+When you store a key, Hazelcast serializes it and computes a hash of the serialized bytes. It then maps that hash to a partition ID using consistent hashing. This ensures that:
+
+- The same key always maps to the same partition, regardless of which member you call from.
+- When members join or leave, only a minimal subset of partition ownership changes.
+
+You can implement `PartitionAware` on your key class to control partitioning — for example, to co-locate related entries in the same partition:
+
+```java
+public class OrderKey implements PartitionAware<String> {
+    private final String orderId;
+    private final String customerId;
+
+    public OrderKey(String orderId, String customerId) {
+        this.orderId = orderId;
+        this.customerId = customerId;
+    }
+
+    @Override
+    public String getPartitionKey() {
+        // All orders for the same customer go to the same partition
+        return customerId;
+    }
+}
+```
+
+## Backup copies
+
+Every partition can have zero or more backup replicas. Backups serve two purposes: they provide redundancy if a member fails, and they can optionally serve read requests.
+
+### Synchronous backups
+
+A synchronous backup (`backupCount`) is written to a backup member before the operation is acknowledged to the caller. This guarantees that data is not lost if the primary member fails immediately after the write.
+
+### Asynchronous backups
+
+An asynchronous backup (`asyncBackupCount`) is acknowledged to the caller immediately, then propagated to the backup member in the background. This reduces write latency at the cost of a small window where data loss is possible if the primary fails before replication completes.
+
+### Configuring backups on IMap
+
+Configure backups in `MapConfig`. The default is 1 synchronous backup and 0 asynchronous backups.
+
+<CodeGroup>
+
+```java Java
+Config config = new Config();
+MapConfig mapConfig = config.getMapConfig("orders");
+
+// 1 synchronous backup (default)
+mapConfig.setBackupCount(1);
+
+// 0 asynchronous backups (default)
+mapConfig.setAsyncBackupCount(0);
+
+// Allow reads from the local backup replica
+mapConfig.setReadBackupData(true);
+```
+
+```xml XML
+<hazelcast>
+  <map name="orders">
+    <backup-count>1</backup-count>
+    <async-backup-count>0</async-backup-count>
+    <read-backup-data>true</read-backup-data>
+  </map>
+</hazelcast>
+```
+
+</CodeGroup>
+
+<Note>
+`MapConfig.DEFAULT_BACKUP_COUNT` is `1`. The maximum total backup count (synchronous + asynchronous) is bounded by `IPartition.MAX_BACKUP_COUNT`.
+</Note>
+
+## Partition groups
+
+By default, Hazelcast places each backup on a different member (`PER_MEMBER` grouping). In deployments where multiple members run on the same physical host, you should use partition groups to ensure backups land on different machines:
+
+```xml
+<hazelcast>
+  <partition-group enabled="true" group-type="HOST_AWARE"/>
+</hazelcast>
+```
+
+Available group types:
+
+| Group type | Description |
+|---|---|
+| `PER_MEMBER` | Default. Each member is its own group. |
+| `HOST_AWARE` | Groups members by IP address. Backups avoid members on the same host. |
+| `ZONE_AWARE` | Groups by availability zone from Discovery SPI metadata. |
+| `NODE_AWARE` | Groups by node name (useful for Kubernetes and Docker Swarm). |
+| `PLACEMENT_AWARE` | Groups by placement metadata (rack, fault domain). |
+| `CUSTOM` | You define groups by specifying IP address ranges. |
+| `SPI` | Group implementation is provided via Discovery SPI. |
+
+```xml
+<!-- CUSTOM example: separate partitions across two data centers -->
+<hazelcast>
+  <partition-group enabled="true" group-type="CUSTOM">
+    <member-group>
+      <interface>10.10.1.*</interface>
+    </member-group>
+    <member-group>
+      <interface>10.10.2.*</interface>
+    </member-group>
+  </partition-group>
+</hazelcast>
+```
+
+<Warning>
+If fewer partition groups exist than the configured total backup count, Hazelcast creates fewer backups than requested. For example, if you configure 2 backups but only have 2 groups, only 1 backup is created.
+</Warning>
+
+## When a member leaves: migration and reassignment
+
+When a member leaves the cluster (gracefully or by crash), Hazelcast redistributes its partitions to the remaining members through a process called **partition migration**:
+
+1. Backup replicas owned by other members are promoted to primary for the departed member's partitions.
+2. New backup replicas are created on remaining members to restore the configured redundancy level.
+3. This process is continuous — as long as the cluster is in `ACTIVE` state, the partition table is kept balanced.
+
+You can listen for migration events using `PartitionService`:
+
+```java
+PartitionService ps = hz.getPartitionService();
+
+UUID id = ps.addMigrationListener(new MigrationListener() {
+    @Override
+    public void migrationStarted(MigrationEvent event) {
+        System.out.println("Migration started: partition "
+            + event.getPartitionId());
+    }
+
+    @Override
+    public void migrationCompleted(MigrationEvent event) {
+        System.out.println("Migration completed: partition "
+            + event.getPartitionId()
+            + " -> " + event.getNewOwner());
+    }
+
+    @Override
+    public void migrationFailed(MigrationEvent event) {
+        System.out.println("Migration failed: partition "
+            + event.getPartitionId());
+    }
+});
+```
+
+### Checking cluster safety
+
+Before shutting down a member, check whether all partitions are replicated:
+
+```java
+PartitionService ps = hz.getPartitionService();
+
+// True when no migrations are running and all backups are in sync
+boolean safe = ps.isClusterSafe();
+
+// Check a specific member
+boolean memberSafe = ps.isMemberSafe(targetMember);
+
+// Force backups to sync before shutdown (with timeout)
+boolean synced = ps.forceLocalMemberToBeSafe(30, TimeUnit.SECONDS);
+```
+
+## Near cache
+
+Near cache is a client-side or member-side in-memory cache that stores a local copy of frequently accessed entries, avoiding a network round-trip for repeated reads.
+
+<Info>
+Near cache improves read throughput significantly for read-heavy workloads. Write operations still go to the primary and invalidate or update affected near cache entries.
+</Info>
+
+Configure near cache in `MapConfig`:
+
+<CodeGroup>
+
+```java Java
+NearCacheConfig nearCacheConfig = new NearCacheConfig()
+    .setName("orders")
+    .setMaxIdleSeconds(60)
+    .setTimeToLiveSeconds(300)
+    .setInvalidateOnChange(true);
+
+MapConfig mapConfig = config.getMapConfig("orders");
+mapConfig.setNearCacheConfig(nearCacheConfig);
+```
+
+```xml XML
+<hazelcast>
+  <map name="orders">
+    <near-cache>
+      <max-idle-seconds>60</max-idle-seconds>
+      <time-to-live-seconds>300</time-to-live-seconds>
+      <invalidate-on-change>true</invalidate-on-change>
+    </near-cache>
+  </map>
+</hazelcast>
+```
+
+</CodeGroup>
+
+<Warning>
+Near cache introduces the possibility of reading stale data during the window between a remote write and local invalidation. If your application requires strict read-your-writes consistency, either disable near cache or ensure you always route reads and writes through the same client instance.
+</Warning>
+
+## Partition-level fault tolerance
+
+If a partition loses all its replicas (primary and all backups) simultaneously — for example, when multiple members fail at once — Hazelcast reports that partition as lost. You can react to this event with a `PartitionLostListener`:
+
+```java
+hz.getPartitionService().addPartitionLostListener(event -> {
+    System.err.println("Partition " + event.getPartitionId()
+        + " lost! Lost backup count: " + event.getLostBackupCount());
+});
+```
+
+To protect against simultaneous loss of multiple members, increase `backupCount` to match the maximum number of failures you want to tolerate. A `backupCount` of `N` means the cluster can lose up to `N` members holding a partition's replicas without losing data.

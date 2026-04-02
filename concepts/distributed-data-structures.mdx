@@ -1,0 +1,225 @@
+---
+title: "Distributed data structures"
+description: "An overview of Hazelcast's built-in distributed data structures, from partitioned maps and queues to strongly consistent CP data structures."
+keywords: ["distributed data structures", "IMap", "MultiMap", "IQueue", "ITopic", "Ringbuffer", "IAtomicLong", "ISemaphore", "CP subsystem", "AP", "CP"]
+---
+
+Hazelcast ships a set of distributed data structures that behave like their standard Java equivalents but store data across the cluster. Each structure is retrieved from a `HazelcastInstance` by name; two members asking for the same name get a view of the same data.
+
+```java
+HazelcastInstance hz = Hazelcast.newHazelcastInstance();
+
+// Distributed map
+IMap<String, Order> orders = hz.getMap("orders");
+
+// Distributed queue
+IQueue<Task> tasks = hz.getQueue("tasks");
+
+// Distributed topic
+ITopic<Event> events = hz.getTopic("events");
+```
+
+## AP vs CP: choosing the right structure
+
+Most Hazelcast data structures follow **AP** semantics under the CAP theorem: they remain available during network partitions and replicate data asynchronously, trading strict consistency for throughput and availability.
+
+For use cases that require **strong consistency** — distributed locks, counters, coordination primitives — Hazelcast provides the **CP Subsystem**, which runs the Raft consensus algorithm and offers linearizable semantics. CP structures are accessed through `HazelcastInstance.getCPSubsystem()` rather than directly from `HazelcastInstance`.
+
+<Info>
+CP Subsystem requires at least three dedicated CP members in the cluster. If CP member count is not configured, CP calls fall back to an unsafe (non-Raft) mode that does not provide full linearizability guarantees.
+</Info>
+
+## AP data structures
+
+### IMap
+
+`IMap<K, V>` is Hazelcast's flagship distributed data structure: a concurrent, observable, and queryable key-value store that implements `java.util.concurrent.ConcurrentMap`.
+
+- Data is partitioned across all cluster members.
+- Supports SQL and predicate-based queries, aggregations, and projections.
+- Entries can have a time-to-live (TTL) and max-idle timeout.
+- Supports synchronous and asynchronous backups, near cache, and map store integration.
+
+```java
+IMap<String, Order> orders = hz.getMap("orders");
+orders.put("order-1", new Order("laptop", 1299.00));
+
+// Predicate query
+Collection<Order> expensive = orders.values(
+    Predicates.greaterThan("price", 1000.0)
+);
+```
+
+### MultiMap
+
+`MultiMap<K, V>` is a specialized map where each key can be associated with multiple values. It is useful for modelling one-to-many relationships without maintaining a separate collection per key.
+
+```java
+MultiMap<String, String> tags = hz.getMultiMap("tags");
+tags.put("article-1", "java");
+tags.put("article-1", "distributed");
+
+Collection<String> articleTags = tags.get("article-1");
+// ["java", "distributed"]
+```
+
+### IQueue
+
+`IQueue<E>` is a distributed, concurrent, blocking queue that implements `java.util.concurrent.BlockingQueue`. All content for a given queue name lives in a single partition (and its backup), so it does not scale horizontally by adding members.
+
+<Note>
+Because `IQueue` is not partitioned, it is best suited for moderate-size work queues. For high-throughput event streaming, consider `Ringbuffer` or a pipeline source.
+</Note>
+
+```java
+IQueue<String> workQueue = hz.getQueue("work-queue");
+workQueue.offer("job-1");
+
+// Blocks until an item is available
+String next = workQueue.take();
+```
+
+### ITopic and IReliableTopic
+
+`ITopic<E>` implements a publish/subscribe (pub/sub) messaging model. Messages published by any cluster member are delivered to all subscribers across the cluster, in publication order.
+
+`IReliableTopic` backs messages in a `Ringbuffer`, which means they are replicated and survive member restarts. Use `IReliableTopic` when you need durable delivery or replay capability.
+
+```java
+ITopic<String> topic = hz.getTopic("notifications");
+
+topic.addMessageListener(message ->
+    System.out.println("Received: " + message.getMessageObject())
+);
+
+topic.publish("Hello, cluster!");
+```
+
+### Ringbuffer
+
+`Ringbuffer<E>` is a fixed-capacity circular buffer designed for event streaming. When the buffer is full, the oldest item is overwritten. Unlike `IQueue.take()`, reading from a `Ringbuffer` is non-destructive: multiple consumers can read the same sequence of events independently.
+
+`Ringbuffer` is replicated but not partitioned — all data lives on a single partition. It is the backing store for `IReliableTopic`.
+
+```java
+Ringbuffer<String> buffer = hz.getRingbuffer("event-log");
+long sequence = buffer.add("event-1");
+
+// Read item at a specific sequence
+String item = buffer.readOne(sequence);
+```
+
+### IList and ISet
+
+`IList<E>` and `ISet<E>` are distributed equivalents of `java.util.List` and `java.util.Set`. Like `IQueue`, each instance lives in a single partition.
+
+```java
+IList<String> list = hz.getList("my-list");
+list.add("alpha");
+list.add("beta");
+
+ISet<String> set = hz.getSet("my-set");
+set.add("alpha");
+set.add("alpha"); // duplicate, ignored
+```
+
+## CP data structures
+
+CP data structures are accessed via the CP Subsystem and provide linearizable, strongly consistent semantics backed by the Raft consensus algorithm.
+
+```java
+CPSubsystem cp = hz.getCPSubsystem();
+```
+
+### IAtomicLong
+
+`IAtomicLong` is a distributed, fault-tolerant alternative to `java.util.concurrent.atomic.AtomicLong`. It is CP with respect to the CAP principle and remains available on only one side of a network partition.
+
+```java
+IAtomicLong counter = hz.getCPSubsystem().getAtomicLong("request-counter");
+long currentValue = counter.incrementAndGet();
+```
+
+### IAtomicReference
+
+`IAtomicReference<V>` is the distributed equivalent of `java.util.concurrent.atomic.AtomicReference`, providing compare-and-set semantics for arbitrary objects.
+
+```java
+IAtomicReference<String> leader = hz.getCPSubsystem().getAtomicReference("leader");
+leader.compareAndSet(null, "member-1");
+```
+
+### ISemaphore
+
+`ISemaphore` is a cluster-wide, fault-tolerant counting semaphore. It guarantees FIFO ordering of `acquire()` calls as seen by the primary replica of the CP group. It is CP with respect to the CAP principle.
+
+```java
+ISemaphore semaphore = hz.getCPSubsystem().getSemaphore("db-connections");
+semaphore.init(10); // 10 permits
+
+semaphore.acquire();
+try {
+    // critical section
+} finally {
+    semaphore.release();
+}
+```
+
+### ICountDownLatch
+
+`ICountDownLatch` is a distributed, fault-tolerant latch for synchronizing across cluster members. Unlike the JDK `CountDownLatch`, the count can be reset via `trySetCount()` after it reaches zero (but not while a countdown is in progress), so the same named latch can be reused across phases.
+
+```java
+ICountDownLatch latch = hz.getCPSubsystem().getCountDownLatch("startup-gate");
+latch.trySetCount(3);
+
+// On each worker member:
+latch.countDown();
+
+// On the coordinator:
+latch.await(30, TimeUnit.SECONDS);
+```
+
+### FencedLock
+
+`FencedLock` is a re-entrant, distributed mutex. Each lock acquisition returns a monotonically increasing fencing token that clients can use to detect and reject operations from superseded lock holders.
+
+```java
+FencedLock lock = hz.getCPSubsystem().getLock("resource-lock");
+long fence = lock.lockAndGetFence();
+try {
+    // use fence token to guard external resource operations
+} finally {
+    lock.unlock();
+}
+```
+
+## Structure comparison
+
+| Structure | Partitioned | Consistency | Use case |
+|---|---|---|---|
+| `IMap` | Yes | AP | General key-value storage, queries |
+| `MultiMap` | Yes | AP | One-to-many relationships |
+| `IQueue` | No | AP | Work queues |
+| `ITopic` | No | AP | Fire-and-forget pub/sub |
+| `IReliableTopic` | No | AP | Durable pub/sub with replay |
+| `Ringbuffer` | No | AP | Event streaming, circular log |
+| `IList` / `ISet` | No | AP | Simple distributed collections |
+| `IAtomicLong` | No | CP | Distributed counters |
+| `ISemaphore` | No | CP | Rate limiting, resource pooling |
+| `FencedLock` | No | CP | Mutual exclusion |
+
+<CardGroup cols={2}>
+  <Card title="IMap" href="/data-structures/imap" icon="table">
+    Partitioned, queryable key-value store with TTL, backups, and near cache support.
+  </Card>
+  <Card title="MultiMap" href="/data-structures/multimap" icon="list">
+    Map with multiple values per key for one-to-many data modelling.
+  </Card>
+  <Card title="Queue, Topic, and Ringbuffer" href="/data-structures/queue-topic-ringbuffer" icon="arrow-right-arrow-left">
+    Messaging and streaming data structures for event-driven architectures.
+  </Card>
+  <Card title="CP Subsystem" href="/data-structures/cp-subsystem" icon="lock">
+    Strongly consistent distributed primitives built on the Raft consensus algorithm.
+  </Card>
+</CardGroup>

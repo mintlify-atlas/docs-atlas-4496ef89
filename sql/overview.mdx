@@ -1,0 +1,151 @@
+---
+title: "SQL overview"
+description: "An introduction to Hazelcast's distributed SQL engine, including requirements, the mapping concept, supported data sources, and basic usage."
+keywords: ["sql", "distributed sql", "hazelcast sql", "apache calcite", "jet", "imap", "kafka"]
+---
+
+Hazelcast includes a distributed SQL engine that lets you query data stored in IMaps, Kafka topics, and files using standard SQL syntax. The engine is built on [Apache Calcite](https://calcite.apache.org) and executes queries as Jet jobs.
+
+## Requirements
+
+Before you can run SQL queries, make sure your environment meets these requirements:
+
+- The `hazelcast-sql.jar` must be on the classpath of every cluster member.
+- Jet must be enabled on the cluster. Jet is **disabled by default** — you must explicitly enable it in your configuration.
+
+<Note>
+The `hazelcast-sql.jar` is only required on members, not on clients. To enable Jet, set `config.getJetConfig().setEnabled(true)` or use `<jet enabled="true"/>` in your XML/YAML configuration.
+</Note>
+
+## How query execution works
+
+When you submit an SQL statement, the member parses and optimizes it using the `hazelcast-sql` module. During optimization, the statement is converted into a directed acyclic graph (DAG) that is distributed to cluster members for execution. Results are streamed back to the originating member asynchronously and returned to you through a `SqlResult`.
+
+<Warning>
+SQL statements are not atomic. `INSERT` and `SINK` statements can fail after committing part of the data.
+</Warning>
+
+## Mappings
+
+Before you can query any data source, you must create a **mapping**. A mapping tells the SQL engine how to interpret a data source as a SQL table — including field names, types, and the format of keys and values.
+
+You create a mapping using the `CREATE MAPPING` DDL statement:
+
+```sql
+CREATE MAPPING my_map (
+    __key BIGINT,
+    name  VARCHAR
+)
+TYPE IMap
+OPTIONS ('keyFormat'='bigint', 'valueFormat'='json-flat')
+```
+
+Once the mapping exists, you can query the data source using its mapped name like any other SQL table.
+
+## Supported data sources
+
+Hazelcast SQL can query these data sources:
+
+<CardGroup cols={3}>
+  <Card title="IMap" icon="database">
+    Query and write to distributed in-memory maps.
+  </Card>
+  <Card title="Kafka" icon="rss">
+    Read from and write to Kafka topics, including streaming queries.
+  </Card>
+  <Card title="Files" icon="file">
+    Query data from local or remote file systems (CSV, JSON, Avro, and Parquet).
+  </Card>
+</CardGroup>
+
+## Basic usage
+
+Use `HazelcastInstance.getSql()` to get the `SqlService`, then call `execute()` with your SQL string. The result is a `SqlResult` that you iterate over to read rows.
+
+```java
+HazelcastInstance hz = ...;
+
+try (SqlResult result = hz.getSql().execute("SELECT * FROM person")) {
+    for (SqlRow row : result) {
+        long personId = row.getObject("personId");
+        String name    = row.getObject("name");
+        // process row
+    }
+}
+```
+
+You can also pass arguments directly to `execute()` using `?` placeholders:
+
+```java
+try (SqlResult result = hz.getSql().execute(
+        "SELECT * FROM person WHERE age > ?", 30)) {
+    for (SqlRow row : result) {
+        String name = row.getObject("name");
+    }
+}
+```
+
+## SqlResult lifecycle
+
+`SqlResult` implements `AutoCloseable`. You must close it when you are done — use a try-with-resources block, as shown above. Closing the result cancels the underlying query on all members if it is still running.
+
+The result can represent either a stream of rows (for `SELECT`) or an update count (for DML). Use `isRowSet()` to distinguish between the two:
+
+- `isRowSet()` returns `true` when the result contains rows to iterate.
+- For DML statements (e.g. `INSERT`), the result does not contain rows; close it immediately after use.
+
+You can also stream rows using the `stream()` method (available since 5.4):
+
+```java
+try (SqlResult result = hz.getSql().execute("SELECT * FROM person")) {
+    result.stream()
+          .filter(row -> (String) row.getObject("name") != null)
+          .forEach(row -> System.out.println(row.getObject("name")));
+}
+```
+
+## Column types
+
+When you retrieve values from a `SqlRow`, the Java type depends on the column's SQL type. The `SqlColumnType` enum defines all supported types:
+
+| SQL type                   | Java type               |
+| -------------------------- | ----------------------- |
+| `VARCHAR`                  | `String`                |
+| `BOOLEAN`                  | `Boolean`               |
+| `TINYINT`                  | `Byte`                  |
+| `SMALLINT`                 | `Short`                 |
+| `INTEGER`                  | `Integer`               |
+| `BIGINT`                   | `Long`                  |
+| `DECIMAL`                  | `BigDecimal`            |
+| `REAL`                     | `Float`                 |
+| `DOUBLE`                   | `Double`                |
+| `DATE`                     | `LocalDate`             |
+| `TIME`                     | `LocalTime`             |
+| `TIMESTAMP`                | `LocalDateTime`         |
+| `TIMESTAMP_WITH_TIME_ZONE` | `OffsetDateTime`        |
+| `OBJECT`                   | Any Java class          |
+| `JSON`                     | `HazelcastJsonValue`    |
+| `NULL`                     | `null` (type is `Void`) |
+
+No implicit conversions are performed when you call `row.getObject(...)`. If the column type is not compatible with the variable you assign it to, a `ClassCastException` is thrown.
+
+You can inspect column metadata at runtime using `SqlResult.getRowMetadata()`, which returns a list of `SqlColumnMetadata` objects. Each exposes `getName()`, `getType()`, and `isNullable()`.
+
+```java
+try (SqlResult result = hz.getSql().execute("SELECT * FROM person")) {
+    result.getRowMetadata().getColumns().forEach(col ->
+        System.out.println(col.getName() + " : " + col.getType())
+    );
+}
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Querying maps with SQL" href="/sql/querying-maps">
+    Learn how to create mappings for IMaps and run SELECT, INSERT, aggregation, and JOIN queries.
+  </Card>
+  <Card title="Streaming SQL queries" href="/sql/streaming-queries">
+    Run continuous queries over Kafka topics and IMap change streams using windowed aggregations.
+  </Card>
+</CardGroup>

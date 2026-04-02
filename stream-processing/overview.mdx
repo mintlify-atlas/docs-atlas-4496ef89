@@ -1,0 +1,92 @@
+---
+title: "Stream processing overview"
+description: "An introduction to the Hazelcast Jet engine: streaming vs. batch processing, the DAG execution model, jobs, sources, transforms, sinks, and processing guarantees."
+---
+
+Hazelcast embeds the **Jet** engine for high-throughput, low-latency data processing. Jet runs as part of every Hazelcast member — there is no separate cluster to deploy or manage. You submit a pipeline or a DAG to the cluster through the `JetService` API and Jet distributes the work across all members automatically.
+
+## Streaming vs. batch processing
+
+Jet treats every computation as a **pipeline** that reads from one or more sources, applies transforms, and writes to one or more sinks. The key distinction is whether the source is bounded or unbounded.
+
+| Mode | Source | When it ends |
+|---|---|---|
+| **Batch** (bounded) | Fixed dataset — e.g. an `IMap` snapshot, a JDBC table, or a directory of files | When the source is exhausted |
+| **Streaming** (unbounded) | Continuous event stream — e.g. an `IMap` change journal, a Kafka topic, or a TCP socket | Never, unless cancelled or it fails |
+
+You choose the mode by how you attach a source to a `Pipeline`:
+
+```java
+// Batch
+BatchStage<Entry<String, Integer>> batchStage = pipeline.readFrom(Sources.map("my-map"));
+
+// Streaming
+StreamSourceStage<Entry<String, Integer>> streamStage =
+        pipeline.readFrom(Sources.mapJournal("my-map", JournalInitialPosition.START_FROM_CURRENT));
+```
+
+## The DAG execution model
+
+Internally, Jet compiles every pipeline into a **Directed Acyclic Graph (DAG)**. Each vertex in the DAG corresponds to a computation step — a source, a transform, or a sink — and each edge carries data between them. Jet instantiates multiple parallel copies of each vertex (processors) across the cluster nodes to achieve horizontal scalability.
+
+You do not normally work with the DAG directly. The `Pipeline` API compiles to a DAG automatically before submission. The Core API (`DAG`, `Vertex`, `Edge`) is available for advanced use cases where you need fine-grained control.
+
+## Key concepts
+
+### Sources
+
+A source is the entry point of a pipeline. Jet provides built-in sources for Hazelcast data structures (`IMap`, `IList`, change journals), messaging systems (Kafka, JMS), databases (JDBC), and files. You can also build custom sources using `Sources.batchFromProcessor` or `Sources.streamFromProcessor`.
+
+### Transforms
+
+A transform stage reads items from its upstream stage, applies a function to each item, and emits results downstream. Common transforms include `map`, `filter`, `flatMap`, `groupingKey`, and windowed aggregation. Streaming stages also support `merge` and `hashJoin` for combining multiple streams.
+
+### Sinks
+
+A sink is the terminal stage of a pipeline. It receives items and writes them to an external system or Hazelcast data structure. Jet provides built-in sinks that mirror the available sources, plus `Sinks.logger()` and `Sinks.observable()` for development and client-side consumption.
+
+### Jobs
+
+A **job** is a running instance of a pipeline. You submit a job by passing a `Pipeline` (or `DAG`) to `JetService.newJob()`. The returned `Job` handle lets you monitor status, wait for completion, or cancel.
+
+```java
+HazelcastInstance hz = Hazelcast.newHazelcastInstance();
+Job job = hz.getJet().newJob(pipeline);
+job.join(); // blocks until the job completes (batch jobs only)
+```
+
+## Processing guarantees
+
+When a cluster member fails during execution, Jet can restart the job and resume from a saved checkpoint. The guarantee offered depends on the `ProcessingGuarantee` you configure in `JobConfig`.
+
+| Guarantee | Snapshots | Behaviour after restart |
+|---|---|---|
+| `NONE` | Disabled | Job restarts from scratch — some items may be lost or duplicated |
+| `AT_LEAST_ONCE` | Enabled | Job resumes from the last snapshot — some items may be processed more than once |
+| `EXACTLY_ONCE` | Enabled | Job resumes from the last snapshot — each item is processed exactly once |
+
+`EXACTLY_ONCE` requires that sinks are idempotent (or support two-phase commit). The `IMap` sink qualifies because a `put` with the same key is idempotent; the file sink and JDBC sink use XA transactions to achieve this.
+
+## Performance characteristics
+
+Jet is designed for high-throughput scenarios. A single cluster node can sustain approximately **10 million events per second** with **sub-10 ms latency** end-to-end, depending on the complexity of the pipeline and the size of the data.
+
+Jet achieves this through cooperative multi-threading: processors share threads without blocking, and data flows between processors in batches within the same JVM without serialisation. Across network boundaries, data is serialised and sent in batches to amortise the cost.
+
+<Note>
+Jet uses the same cluster members as the rest of Hazelcast. Running data-intensive pipelines alongside other workloads (e.g., heavy `IMap` reads/writes) will compete for the same CPU and memory resources.
+</Note>
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Building pipelines" href="/stream-processing/pipelines" icon="diagram-project">
+    Create a pipeline step by step and submit it as a job.
+  </Card>
+  <Card title="Sources and sinks" href="/stream-processing/sources-and-sinks" icon="plug">
+    Reference for all built-in connectors.
+  </Card>
+  <Card title="Windowing and aggregation" href="/stream-processing/windowing-and-aggregation" icon="clock">
+    Group events into time windows and aggregate results.
+  </Card>
+</CardGroup>

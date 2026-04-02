@@ -1,0 +1,117 @@
+---
+title: "Replicated map"
+description: "A weakly consistent distributed map that stores a full copy of all entries on every cluster member. Optimized for small, frequently read reference datasets."
+---
+
+A `ReplicatedMap` stores a complete copy of all entries on **every** cluster member. There is no partitioning — every member holds the entire dataset in memory. Writes propagate asynchronously to all members, so reads are always local and extremely fast.
+
+## When to use ReplicatedMap
+
+Use `ReplicatedMap` for:
+
+- Small reference datasets that change infrequently (country codes, product catalogs, feature flags)
+- Configuration data that every node reads on every request
+- Session affinity is not required but local read latency matters
+
+<Warning>
+`ReplicatedMap` uses **eventual consistency**. After a write, other members may still return the old value for a short window until the update propagates. It does not support server-side predicate queries.
+</Warning>
+
+## Getting a ReplicatedMap
+
+```java
+HazelcastInstance hz = Hazelcast.newHazelcastInstance();
+ReplicatedMap<String, Country> countries = hz.getReplicatedMap("countries");
+```
+
+## Basic operations
+
+```java
+// Write — replicated to all members asynchronously
+countries.put("US", new Country("United States", "USD"));
+countries.put("DE", new Country("Germany", "EUR"));
+
+// Read — always local, no network hop
+Country us = countries.get("US");
+
+// Check presence
+boolean hasGermany = countries.containsKey("DE");
+
+// Remove
+countries.remove("DE");
+
+// Iterate
+for (Map.Entry<String, Country> entry : countries.entrySet()) {
+    System.out.println(entry.getKey() + ": " + entry.getValue().getName());
+}
+
+// Size
+int total = countries.size();
+```
+
+## TTL support
+
+You can associate a time-to-live with individual entries:
+
+```java
+// Entry expires after 1 hour
+countries.put("TEMP", new Country("Temporary", "XXX"), 1, TimeUnit.HOURS);
+```
+
+<Note>
+`ReplicatedMap` does not support per-entry max-idle timeouts — only TTL is available at the entry level.
+</Note>
+
+## Event listeners
+
+`ReplicatedMap` fires events for add, update, remove, and evict operations. You can listen to the whole map, a specific key, or entries matching a predicate.
+
+```java
+// Listen to all events on the map
+UUID id = countries.addEntryListener(new EntryAddedListener<String, Country>() {
+    @Override
+    public void entryAdded(EntryEvent<String, Country> event) {
+        System.out.println("New country: " + event.getKey());
+    }
+});
+
+// Listen to events on a specific key
+countries.addEntryListener(listener, "US");
+
+// Listen filtered by predicate
+countries.addEntryListener(listener,
+    Predicates.equal("currency", "EUR"));
+
+// Remove the listener
+countries.removeEntryListener(id);
+```
+
+## Values and key set ordering
+
+`ReplicatedMap` supports sorted views. Pass a `Comparator` to `values()` or `keySet()` to get results in a defined order:
+
+```java
+// Sort values by country name
+Collection<Country> sorted = countries.values(
+    Comparator.comparing(Country::getName));
+```
+
+<Note>
+The returned `Collection` from `values()` is a lazy, read-only view. Calling `contains` or `containsAll` on it is expensive because it performs a linear scan. Copy it to a `List` or `Set` before doing repeated membership checks.
+</Note>
+
+## ReplicatedMap vs IMap
+
+| Aspect | ReplicatedMap | IMap |
+|---|---|---|
+| Storage | Full copy on every member | Partitioned across members |
+| Read | Always local (no network) | May require network hop |
+| Write latency | Async propagation (faster write acknowledgement) | Sync to owner + backups |
+| Consistency | Eventual | Strong (CP options available) |
+| Scale-out reads | Yes — every node serves reads | Reads go to the owning partition |
+| Scale-out storage | No — all members hold all data | Yes — each member holds a subset |
+| Predicate queries | Not supported | Supported |
+| Entry processors | Not supported | Supported |
+| Best for | Small reference data, read-heavy | General-purpose, any size |
+
+Choose `ReplicatedMap` when your dataset is small (fits easily in a single node's heap), changes infrequently, and every node needs to read it without network latency. For everything else, use `IMap`.

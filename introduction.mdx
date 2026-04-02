@@ -1,0 +1,75 @@
+---
+title: "Introduction"
+description: "Hazelcast is a unified real-time data platform that combines an in-memory data store with the Jet stream processing engine."
+---
+
+Hazelcast lets you process streaming data, enrich it with historical context, and take action on it — all before it ever reaches a database or data lake. It is built for workloads where milliseconds matter.
+
+<Info>
+  Hazelcast is used in production by organizations including Lowe's, HSBC, JPMorgan Chase, and Volvo. It is named in the Gartner Market Guide to Event Stream Processing and recognized as a leader in the GigaOm Radar Report for Streaming Data Platforms.
+</Info>
+
+## What Hazelcast is
+
+At its core, Hazelcast is two things running as one:
+
+- **In-memory data store** — a distributed, partitioned key-value store (IMap) with SQL query support, pub-sub messaging, queues, and more.
+- **Jet stream processing engine** — a built-in engine for building stateful, fault-tolerant batch and streaming data pipelines using a high-level dataflow API.
+
+Because both run in the same cluster process, you can enrich a live event stream with data from an IMap without a network hop, and query the same map with SQL from any client.
+
+## When to use Hazelcast
+
+Hazelcast is well suited for the following workloads:
+
+- **Stateful stream processing** — aggregate, filter, join, and enrich event streams in real time with at-least-once or exactly-once guarantees.
+- **Low-latency caching** — use IMap as a read/write-through or write-behind cache in front of a database, with microsecond point-lookup performance.
+- **SQL over live data** — query streaming sources and in-memory maps directly using standard SQL, without exporting data first.
+- **Distributed coordination** — use locks, semaphores, and atomic references from the CP subsystem for microservice coordination.
+- **Pub-sub and queuing** — decouple producers and consumers with distributed topics and queues, with microsecond latency.
+- **WAN replication** — replicate data between data centers or geographic regions for disaster recovery and multi-region deployments.
+
+## Key features
+
+| Feature | Description |
+|---|---|
+| IMap | Distributed, partitioned, queryable key-value store with event listeners and near-cache support |
+| Jet pipelines | Dataflow API for building streaming and batch jobs that run on the cluster |
+| SQL engine | ANSI-compatible SQL for querying maps, streaming sources, and external connectors |
+| Connectors | Built-in connectors for Kafka, Hadoop, S3, RDBMS, JMS, and more |
+| CP subsystem | Linearizable distributed data structures (locks, semaphores, atomic longs) backed by the Raft algorithm |
+| WAN replication | Active-active and active-passive replication between clusters |
+| Vector search (Beta) | Store and search high-dimensional vectors alongside structured data using `VectorDocument` and `SearchOptions` |
+| Rolling upgrades | Zero-downtime cluster upgrades |
+| Client libraries | Java, Python, Node.js, .NET, C++, and Go clients |
+
+## Performance
+
+A single Hazelcast node can aggregate 10 million events per second with latency under 10 milliseconds. A cluster of nodes can process billions of events per second. Point lookups and pub-sub messaging operate at microsecond latencies.
+
+<Note>
+  Hazelcast targets 99.99% of operations completing in under 10 ms for streaming queries at millions of events per second.
+</Note>
+
+## Explore the docs
+
+<CardGroup cols={2}>
+  <Card title="Quick start" icon="rocket" href="/quickstart">
+    Get a Hazelcast cluster running and store your first data in under 5 minutes.
+  </Card>
+  <Card title="Installation" icon="download" href="/installation">
+    All installation methods: Maven, Gradle, Docker, and building from source.
+  </Card>
+  <Card title="IMap" icon="database" href="/data-structures/imap">
+    The distributed map — the primary data structure in Hazelcast.
+  </Card>
+  <Card title="Stream processing" icon="bolt" href="/stream-processing/overview">
+    Build stateful streaming pipelines with the Jet engine.
+  </Card>
+  <Card title="SQL" icon="code" href="/sql/overview">
+    Query maps and streaming data with standard SQL.
+  </Card>
+  <Card title="Concepts" icon="book" href="/concepts/distributed-data-structures">
+    Understand partitioning, replication, and clustering fundamentals.
+  </Card>
+</CardGroup>

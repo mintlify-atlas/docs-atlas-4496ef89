@@ -1,0 +1,349 @@
+---
+title: "IMap: distributed map"
+description: "The primary Hazelcast data structure. A concurrent, distributed, observable, and queryable map that supports TTL, predicates, entry processors, map stores, near cache, and distributed locking."
+---
+
+`IMap` is the core Hazelcast data structure. It implements `ConcurrentMap` and distributes entries across all cluster members using consistent hashing. Every key maps to exactly one partition, and that partition is owned by one primary member and backed by configurable replicas.
+
+<Note>
+`IMap` intentionally violates the `Map` contract. Equality and hash code are computed on the **serialized byte form** of keys and values, not on the Java `equals`/`hashCode` implementations. Values returned by `get` are clones — modifying a returned value has no effect until you call `put` again. Collections returned by `keySet`, `values`, and `entrySet` are immutable snapshots.
+</Note>
+
+## Getting an IMap
+
+```java
+HazelcastInstance hz = Hazelcast.newHazelcastInstance();
+IMap<String, Employee> employees = hz.getMap("employees");
+```
+
+The map is created on first access and destroyed only when you call `destroy()` on it. `null` keys and `null` values are not permitted.
+
+## Basic CRUD
+
+```java
+// Create / update
+employees.put("alice", new Employee("Alice", 30));
+
+// Read — returns a clone, not the live object
+Employee e = employees.get("alice");
+
+// Check existence without loading the value
+boolean exists = employees.containsKey("alice");
+
+// Remove and return the previous value
+Employee removed = employees.remove("alice");
+
+// Remove without returning the old value (more efficient)
+employees.delete("alice");
+
+// Size
+int count = employees.size();
+
+// Bulk read
+Set<String> keys = Set.of("alice", "bob");
+Map<String, Employee> batch = employees.getAll(keys);
+```
+
+<Tip>
+Prefer `delete` over `remove` when you do not need the old value. `remove` serializes and transfers the previous value over the network; `delete` skips that cost.
+</Tip>
+
+## TTL and max-idle expiration
+
+You can attach a time-to-live (TTL) or a max-idle timeout to any entry at write time.
+
+```java
+// Entry expires 30 minutes after it was last written
+employees.put("alice", new Employee("Alice", 30), 30, TimeUnit.MINUTES);
+
+// Entry expires 10 minutes after the last read or write
+employees.put("bob", new Employee("Bob", 25),
+    0, TimeUnit.SECONDS,       // no TTL
+    10, TimeUnit.MINUTES);     // max-idle = 10 min
+
+// set() variant — same TTL semantics but does not return old value
+employees.set("carol", new Employee("Carol", 28), 1, TimeUnit.HOURS);
+```
+
+TTL resolution is seconds; sub-second values are rounded up. Locked entries are exempt from expiration.
+
+Map-wide defaults can be configured in `hazelcast.xml`:
+
+```xml
+<map name="employees">
+    <time-to-live-seconds>1800</time-to-live-seconds>
+    <max-idle-seconds>600</max-idle-seconds>
+</map>
+```
+
+## Async operations
+
+All mutating and read methods have async counterparts that return `CompletionStage`.
+
+<Tabs>
+  <Tab title="Sync">
+    ```java
+    // Blocks until the operation completes
+    Employee old = employees.put("alice", newEmployee);
+    Employee current = employees.get("alice");
+    Employee prev = employees.remove("alice");
+    ```
+  </Tab>
+  <Tab title="Async">
+    ```java
+    // Returns immediately; chain callbacks or block explicitly
+    CompletionStage<Employee> getFuture = employees.getAsync("alice");
+    getFuture.thenAccept(emp -> System.out.println("Got: " + emp));
+
+    CompletionStage<Employee> putFuture = employees.putAsync("alice", newEmployee);
+    Employee old = putFuture.toCompletableFuture().get(); // blocking wait
+
+    CompletionStage<Employee> removeFuture = employees.removeAsync("alice");
+
+    // Async put with TTL
+    employees.putAsync("alice", newEmployee, 30, TimeUnit.MINUTES)
+             .thenRun(() -> System.out.println("Stored with TTL"));
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+Use `setAsync` instead of `putAsync` when you do not need the previous value — it avoids the serialization and network cost of returning the old entry.
+</Note>
+
+## Querying with predicates
+
+`IMap` supports server-side filtering using the `Predicate` API. Predicates run on the cluster, so only matching entries are transferred to the caller.
+
+```java
+import com.hazelcast.query.Predicates;
+
+// Equality
+Collection<Employee> alices = employees.values(
+    Predicates.equal("name", "Alice"));
+
+// Range
+Collection<Employee> midAged = employees.values(
+    Predicates.between("age", 30, 40));
+
+// Compound
+Collection<Employee> result = employees.values(
+    Predicates.and(
+        Predicates.greaterEqual("age", 25),
+        Predicates.equal("department", "Engineering")));
+
+// SQL-style predicate
+Collection<Employee> seniors = employees.values(
+    Predicates.sql("age > 40 AND active = true"));
+
+// Query by key set instead of values
+Set<String> keys = employees.keySet(Predicates.equal("department", "HR"));
+```
+
+<Tip>
+Add an index to fields you query frequently to avoid full partition scans:
+
+```java
+employees.addIndex(IndexType.HASH, "department");
+employees.addIndex(IndexType.SORTED, "age");
+```
+</Tip>
+
+## Entry processors
+
+An `EntryProcessor` executes atomically on the partition that owns a key, avoiding separate get-modify-put round trips and removing the need for explicit locks on single-key operations.
+
+```java
+// Increment salary in place — runs on the owning partition thread
+employees.executeOnKey("alice", entry -> {
+    Employee emp = entry.getValue();
+    if (emp != null) {
+        emp.setSalary(emp.getSalary() * 1.1);
+        entry.setValue(emp);
+    }
+    return null;
+});
+
+// Apply to all entries matching a predicate
+employees.executeOnEntries(
+    entry -> {
+        Employee emp = entry.getValue();
+        emp.setActive(false);
+        entry.setValue(emp);
+        return null;
+    },
+    Predicates.equal("department", "Legacy"));
+```
+
+When using `executeOnEntries` or `executeOnKeys`, the processor runs regardless of whether the entry is locked. Use `executeOnKey` / `submitToKey` for lock-aware single-key execution.
+
+You can also set a per-entry TTL directly from inside the processor using `ExtendedMapEntry`:
+
+```java
+employees.executeOnKey("alice", e -> {
+    ExtendedMapEntry<String, Employee> entry = (ExtendedMapEntry<String, Employee>) e;
+    Employee emp = entry.getValue();
+    emp.setSalary(emp.getSalary() * 1.1);
+    entry.setValue(emp, 24, TimeUnit.HOURS); // write with TTL
+    return null;
+});
+```
+
+## Event listeners
+
+Subscribe to map events using `addEntryListener`. You can listen to the whole map or filter by key or predicate.
+
+```java
+UUID listenerId = employees.addEntryListener(new EntryAddedListener<String, Employee>() {
+    @Override
+    public void entryAdded(EntryEvent<String, Employee> event) {
+        System.out.println("Added: " + event.getKey() + " = " + event.getValue());
+    }
+}, true); // true = include value in event
+
+// Listen on a specific key
+employees.addEntryListener(listener, "alice", true);
+
+// Listen filtered by predicate
+employees.addEntryListener(listener,
+    Predicates.equal("department", "Engineering"), true);
+
+// Remove listener when done
+employees.removeEntryListener(listenerId);
+```
+
+## Map store: write-through and write-behind
+
+A `MapStore` backs the in-memory map with external storage. When configured, Hazelcast calls `store`, `storeAll`, `delete`, and `deleteAll` to persist changes, and calls `load` / `loadAll` to reload entries on cache miss.
+
+<Tabs>
+  <Tab title="MapStore interface">
+    ```java
+    public class EmployeeStore implements MapStore<String, Employee> {
+
+        @Override
+        public void store(String key, Employee value) {
+            // write to database
+        }
+
+        @Override
+        public void storeAll(Map<String, Employee> map) {
+            // batch write
+        }
+
+        @Override
+        public void delete(String key) {
+            // delete from database
+        }
+
+        @Override
+        public void deleteAll(Collection<String> keys) {
+            // batch delete
+        }
+
+        @Override
+        public Employee load(String key) {
+            // read from database; return null if not found
+            return database.findById(key);
+        }
+
+        @Override
+        public Map<String, Employee> loadAll(Collection<String> keys) {
+            return database.findByIds(keys);
+        }
+
+        @Override
+        public Iterable<String> loadAllKeys() {
+            // called on startup to pre-populate the map
+            return database.allIds();
+        }
+    }
+    ```
+  </Tab>
+  <Tab title="Write-through config">
+    ```xml
+    <map name="employees">
+        <map-store enabled="true">
+            <!-- writeDelaySeconds=0 means write-through -->
+            <write-delay-seconds>0</write-delay-seconds>
+            <class-name>com.example.EmployeeStore</class-name>
+        </map-store>
+    </map>
+    ```
+  </Tab>
+  <Tab title="Write-behind config">
+    ```xml
+    <map name="employees">
+        <map-store enabled="true">
+            <!-- writeDelaySeconds>0 means write-behind -->
+            <write-delay-seconds>5</write-delay-seconds>
+            <write-batch-size>100</write-batch-size>
+            <write-coalescing>true</write-coalescing>
+            <class-name>com.example.EmployeeStore</class-name>
+        </map-store>
+    </map>
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+`MapStore` implementations must be **idempotent**. Hazelcast provides at-least-once delivery semantics — `store` and `delete` may be called more than once for the same entry due to retries after failures or migrations.
+</Warning>
+
+**Write-through** (`writeDelaySeconds = 0`): `store` is called synchronously as part of `put`. If `store` throws, the `put` fails.
+
+**Write-behind** (`writeDelaySeconds > 0`): writes are batched and flushed asynchronously after the configured delay. You can call `map.flush()` to force an immediate flush of dirty entries.
+
+## Near cache
+
+Near cache keeps a local copy of frequently accessed entries on the client side, reducing network round trips for read-heavy workloads.
+
+```xml
+<!-- In client configuration -->
+<near-cache name="employees">
+    <time-to-live-seconds>300</time-to-live-seconds>
+    <max-idle-seconds>60</max-idle-seconds>
+    <eviction eviction-policy="LRU" max-size-policy="ENTRY_COUNT" size="10000"/>
+    <invalidate-on-change>true</invalidate-on-change>
+</near-cache>
+```
+
+<Warning>
+Near cache introduces eventual consistency: reads may return slightly stale values between an update and the invalidation event arriving at the client. Do not use near cache for data that requires strict read-your-own-writes guarantees.
+</Warning>
+
+## Distributed locking
+
+`IMap` provides entry-level distributed locks. These are reentrant and scoped to the calling thread.
+
+```java
+// Acquire indefinitely
+employees.lock("alice");
+try {
+    Employee emp = employees.get("alice");
+    emp.setSalary(emp.getSalary() * 1.05);
+    employees.put("alice", emp);
+} finally {
+    employees.unlock("alice");
+}
+
+// Try to acquire with timeout — returns false if lock is held
+if (employees.tryLock("alice", 5, TimeUnit.SECONDS)) {
+    try {
+        // critical section
+    } finally {
+        employees.unlock("alice");
+    }
+} else {
+    System.out.println("Could not acquire lock in time");
+}
+
+// Lock with auto-release lease
+employees.lock("alice", 30, TimeUnit.SECONDS);
+```
+
+<Note>
+Locked entries are not subject to TTL expiration or eviction. Always release locks in a `finally` block to avoid deadlocks.
+</Note>
+
+For most in-place mutations, prefer an `EntryProcessor` over explicit locking — it runs atomically on the partition thread and avoids the overhead of network round trips to acquire and release the lock.

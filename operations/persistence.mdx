@@ -1,0 +1,243 @@
+---
+title: "Persistence"
+description: "Persist Hazelcast data to disk so members can restart without reloading from external storage. This page covers PersistenceConfig, data recovery policies, rolling restarts, and tiered storage."
+---
+
+Hazelcast Persistence (formerly Hot Restart) saves in-memory data to disk. When a cluster restarts, members reload their data from disk instead of waiting for it to be loaded from an external data store, dramatically reducing restart times.
+
+<Warning>
+Persistence is a **Hazelcast Enterprise HD** feature. You need a valid Enterprise license to enable it.
+</Warning>
+
+## How persistence works
+
+Each Hazelcast member writes its data to a local directory. The data is stored in a write-ahead log (WAL) format and periodically compacted. On restart, members read their persisted data and wait for the rest of the cluster to start. The cluster then validates and loads the data according to the configured recovery policy.
+
+Persistence is currently supported for IMap and ICache data structures. You must enable persistence both at the cluster level (`PersistenceConfig`) and on each individual map or cache (`DataPersistenceConfig`).
+
+## Configuring persistence
+
+### PersistenceConfig
+
+`PersistenceConfig` (`com.hazelcast.config.PersistenceConfig`) controls the global persistence settings.
+
+<CodeGroup>
+
+```java Java
+import com.hazelcast.config.Config;
+import com.hazelcast.config.PersistenceConfig;
+import com.hazelcast.config.PersistenceClusterDataRecoveryPolicy;
+
+PersistenceConfig persistenceConfig = new PersistenceConfig()
+        .setEnabled(true)
+        .setBaseDir(new java.io.File("/mnt/persistence"))
+        .setBackupDir(new java.io.File("/mnt/persistence-backup"))
+        .setValidationTimeoutSeconds(120)
+        .setDataLoadTimeoutSeconds(900)
+        .setClusterDataRecoveryPolicy(
+            PersistenceClusterDataRecoveryPolicy.PARTIAL_RECOVERY_MOST_COMPLETE)
+        .setAutoRemoveStaleData(true);
+
+Config config = new Config();
+config.setPersistenceConfig(persistenceConfig);
+```
+
+```xml XML
+<persistence enabled="true">
+    <base-dir>/mnt/persistence</base-dir>
+    <backup-dir>/mnt/persistence-backup</backup-dir>
+    <validation-timeout-seconds>120</validation-timeout-seconds>
+    <data-load-timeout-seconds>900</data-load-timeout-seconds>
+    <cluster-data-recovery-policy>PARTIAL_RECOVERY_MOST_COMPLETE</cluster-data-recovery-policy>
+    <auto-remove-stale-data>true</auto-remove-stale-data>
+</persistence>
+```
+
+```yaml YAML
+hazelcast:
+  persistence:
+    enabled: true
+    base-dir: /mnt/persistence
+    backup-dir: /mnt/persistence-backup
+    validation-timeout-seconds: 120
+    data-load-timeout-seconds: 900
+    cluster-data-recovery-policy: PARTIAL_RECOVERY_MOST_COMPLETE
+    auto-remove-stale-data: true
+```
+
+</CodeGroup>
+
+### Key configuration properties
+
+| Property | Default | Description |
+|---|---|---|
+| `baseDir` | `"persistence"` | Directory where persistence data is stored. Created automatically if it does not exist. |
+| `backupDir` | _(none)_ | Directory for persistence backups. Each backup is stored in a uniquely named subdirectory. Backups are disabled if not set. |
+| `validationTimeoutSeconds` | `120` | How long to wait for all expected members to join before recovery begins. |
+| `dataLoadTimeoutSeconds` | `900` | How long to give all members to load their local data before the cluster declares recovery complete. |
+| `autoRemoveStaleData` | `true` | Automatically remove stale persistence data from members that terminated while the cluster was `ACTIVE`. |
+| `parallelism` | `1` | Deprecated. Leave at default. |
+
+### Enabling persistence on a map
+
+Enable persistence for each map individually using `DataPersistenceConfig`:
+
+<CodeGroup>
+
+```java Java
+import com.hazelcast.config.MapConfig;
+import com.hazelcast.config.DataPersistenceConfig;
+
+MapConfig mapConfig = new MapConfig("orders")
+        .setDataPersistenceConfig(
+            new DataPersistenceConfig()
+                .setEnabled(true)
+                .setFsync(false));
+
+config.addMapConfig(mapConfig);
+```
+
+```xml XML
+<map name="orders">
+    <data-persistence enabled="true">
+        <fsync>false</fsync>
+    </data-persistence>
+</map>
+```
+
+```yaml YAML
+hazelcast:
+  map:
+    orders:
+      data-persistence:
+        enabled: true
+        fsync: false
+```
+
+</CodeGroup>
+
+Set `fsync` to `true` to call `fsync` after every write. This is safer but slower; leave it `false` for higher throughput and rely on the OS page cache.
+
+## Data recovery policies
+
+The `clusterDataRecoveryPolicy` controls what happens if not all members return after a restart.
+
+| Policy | Behaviour |
+|---|---|
+| `FULL_RECOVERY_ONLY` | The cluster waits until all members with persistence data have rejoined. If any member is permanently lost, the cluster cannot start. This is the safest option. |
+| `PARTIAL_RECOVERY_MOST_RECENT` | Allow the cluster to start with the most up-to-date subset of members. Missing partitions are empty. |
+| `PARTIAL_RECOVERY_MOST_COMPLETE` | Allow the cluster to start with the subset of members that have the most complete data. Missing partitions are empty. |
+
+<Warning>
+`PARTIAL_RECOVERY_MOST_RECENT` and `PARTIAL_RECOVERY_MOST_COMPLETE` can result in data loss if members with more recent data do not rejoin. Use `FULL_RECOVERY_ONLY` when data integrity is critical.
+</Warning>
+
+## Rolling restart procedure
+
+A rolling restart upgrades or patches members one at a time while the cluster stays online. Persistence is required because each restarting member reloads its own data from disk.
+
+<Steps>
+  <Step title="Verify persistence is enabled">
+    Confirm that persistence is enabled on all members and that the `baseDir` directory is accessible.
+  </Step>
+  <Step title="Change cluster state to FROZEN or PASSIVE">
+    Use Management Center or the REST API to set the cluster state to `FROZEN` (disables migrations) or `PASSIVE` (disables all operations). `FROZEN` is preferred for rolling restarts.
+
+    ```bash
+    # Set cluster state to FROZEN
+    curl -X POST "http://member:5701/hazelcast/rest/cluster/changeState" \
+         -d '{"state":"frozen"}'
+    ```
+  </Step>
+  <Step title="Restart each member one at a time">
+    Stop one member, apply your changes (e.g., update the JAR), and restart it. Wait for the member to fully rejoin the cluster before moving to the next.
+  </Step>
+  <Step title="Restore cluster state to ACTIVE">
+    After all members have restarted, restore the cluster state:
+
+    ```bash
+    curl -X POST "http://member:5701/hazelcast/rest/cluster/changeState" \
+         -d '{"state":"active"}'
+    ```
+  </Step>
+</Steps>
+
+## Tiered storage
+
+Tiered storage extends IMap capacity by using both memory and a local disk device. Hot data stays in memory; cold data spills to disk automatically.
+
+### Configuring a local device
+
+First, define a `LocalDeviceConfig` for the disk:
+
+<CodeGroup>
+
+```xml XML
+<local-device name="my-disk">
+    <base-dir>/mnt/tiered-store</base-dir>
+    <capacity unit="GIGABYTES" value="512"/>
+    <block-size>4096</block-size>
+    <read-io-thread-count>4</read-io-thread-count>
+    <write-io-thread-count>4</write-io-thread-count>
+</local-device>
+```
+
+```yaml YAML
+hazelcast:
+  local-device:
+    my-disk:
+      base-dir: /mnt/tiered-store
+      capacity:
+        unit: GIGABYTES
+        value: 512
+      block-size: 4096
+      read-io-thread-count: 4
+      write-io-thread-count: 4
+```
+
+</CodeGroup>
+
+### Enabling tiered storage on a map
+
+```xml XML
+<map name="large-dataset">
+    <in-memory-format>NATIVE</in-memory-format>
+    <tiered-store enabled="true">
+        <memory-tier>
+            <capacity unit="MEGABYTES" value="512"/>
+        </memory-tier>
+        <disk-tier enabled="true" device-name="my-disk"/>
+    </tiered-store>
+</map>
+```
+
+```yaml YAML
+hazelcast:
+  map:
+    large-dataset:
+      in-memory-format: NATIVE
+      tiered-store:
+        enabled: true
+        memory-tier:
+          capacity:
+            unit: MEGABYTES
+            value: 512
+        disk-tier:
+          enabled: true
+          device-name: my-disk
+```
+
+<Note>
+Tiered storage requires `in-memory-format: NATIVE` and a Hazelcast Enterprise license with native memory configured.
+</Note>
+
+## Backup persistence
+
+Configure `backupDir` to enable backup snapshots of persistence data. Each backup is created in a timestamped subdirectory of `backupDir`. Trigger a backup via the Management Center or the REST API:
+
+```bash
+# Trigger a hot backup
+curl -X POST "http://member:5701/hazelcast/rest/management/cluster/hotBackup"
+```
+
+Backups can be used to restore a cluster to a known-good point in time by copying a backup directory's contents to `baseDir` before starting the cluster.

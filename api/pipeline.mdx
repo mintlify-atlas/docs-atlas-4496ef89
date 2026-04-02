@@ -1,0 +1,373 @@
+---
+title: "Pipeline API"
+description: "Reference for Hazelcast Jet's Pipeline API. Covers Pipeline, BatchStage, StreamStage, and WindowDefinition for building distributed data processing jobs."
+---
+
+The Pipeline API models a distributed computation as a graph of interconnected stages. Data flows from source stages, through transform stages, to sink stages. You build a `Pipeline` object, configure it, and submit it to Jet for execution.
+
+---
+
+## Pipeline
+
+`Pipeline` is a serializable container for all the stages of a job. Create one with the static factory method:
+
+```java
+Pipeline p = Pipeline.create();
+```
+
+### Reading from sources
+
+<ResponseField name="readFrom(BatchSource&lt;T&gt; source)" type="BatchStage&lt;T&gt;">
+  Adds a bounded (batch) source stage. The pipeline will process all data from the source and then finish.
+
+  ```java
+  BatchStage<Map.Entry<String, Order>> stage = p.readFrom(Sources.map("orders"));
+  ```
+</ResponseField>
+
+<ResponseField name="readFrom(StreamSource&lt;T&gt; source)" type="StreamSourceStage&lt;T&gt;">
+  Adds an unbounded (streaming) source stage. The pipeline runs indefinitely, processing data as it arrives.
+
+  ```java
+  StreamSourceStage<Map.Entry<String, Order>> stage =
+      p.readFrom(Sources.mapJournal("orders", JournalInitialPosition.START_FROM_CURRENT));
+  ```
+</ResponseField>
+
+### Writing to sinks
+
+```java
+<T> SinkStage writeTo(Sink<? super T> sink,
+                      GeneralStage<? extends T> stage0,
+                      GeneralStage<? extends T> stage1,
+                      GeneralStage<? extends T>... moreStages)
+```
+
+Use this `Pipeline`-level `writeTo` to drain multiple stages into the same sink. For the single-stage case, call `stage.writeTo(sink)` directly.
+
+### Order preservation
+
+<ResponseField name="setPreserveOrder(boolean value)" type="Pipeline">
+  When `true`, Jet ensures each stage sees events in the same order as the source emitted them (per partition). This restricts internal optimizations, including keyless `rebalance()`. Default is `false`.
+
+  ```java
+  p.setPreserveOrder(true);
+  ```
+</ResponseField>
+
+### Utilities
+
+```java
+boolean isEmpty()      // true if no stages have been added
+String toDotString()   // DOT/graphviz representation of the pipeline graph
+```
+
+---
+
+## BatchStage
+
+A `BatchStage<T>` processes a finite amount of data. You get one from `pipeline.readFrom(BatchSource)` and chain transforms on it.
+
+<AccordionGroup>
+
+<Accordion title="Core transforms">
+
+```java
+<R> BatchStage<R> map(FunctionEx<? super T, ? extends R> mapFn)
+```
+Applies a function to each item, producing one output per input.
+
+```java
+BatchStage<T> filter(PredicateEx<T> filterFn)
+```
+Keeps only items for which the predicate returns `true`.
+
+```java
+<R> BatchStage<R> flatMap(FunctionEx<? super T, ? extends Traverser<R>> flatMapFn)
+```
+Maps each item to zero or more outputs.
+
+```java
+BatchStage<Order> orders = p.readFrom(Sources.map("orders"))
+    .map(Map.Entry::getValue)               // extract values
+    .filter(o -> o.getQuantity() > 0)       // keep non-empty orders
+    .flatMap(o -> Traverser.over(o.lines())); // expand order lines
+```
+
+</Accordion>
+
+<Accordion title="Stateful transforms">
+
+```java
+<S, R> BatchStage<R> mapStateful(
+    SupplierEx<? extends S> createFn,
+    BiFunctionEx<? super S, ? super T, ? extends R> mapFn)
+```
+Maintains per-processor state across items.
+
+```java
+<S> BatchStage<T> filterStateful(
+    SupplierEx<? extends S> createFn,
+    BiPredicateEx<? super S, ? super T> filterFn)
+```
+
+```java
+<S, R> BatchStage<R> flatMapStateful(
+    SupplierEx<? extends S> createFn,
+    BiFunctionEx<? super S, ? super T, ? extends Traverser<R>> flatMapFn)
+```
+
+</Accordion>
+
+<Accordion title="Sorting">
+
+```java
+BatchStage<T> sort()
+BatchStage<T> sort(ComparatorEx<? super T> comparator)
+```
+Sorts items within the stage. Memory-bounded; see `InstanceConfig.setMaxProcessorAccumulatedRecords`.
+
+```java
+BatchStage<Order> sorted = orders.sort(ComparatorEx.comparing(Order::getTimestamp));
+```
+
+</Accordion>
+
+<Accordion title="Grouping and aggregation">
+
+```java
+<K> BatchStageWithKey<T, K> groupingKey(FunctionEx<? super T, ? extends K> keyFn)
+```
+Groups items by a key for use with aggregation operations. Returns a `BatchStageWithKey`.
+
+```java
+// Count orders per customer
+BatchStageWithKey<Order, String> byCustomer = orders.groupingKey(Order::getCustomerId);
+BatchStage<Map.Entry<String, Long>> counts = byCustomer.aggregate(AggregateOperations.counting());
+```
+
+</Accordion>
+
+<Accordion title="Service-enriched transforms">
+
+```java
+<S, R> BatchStage<R> mapUsingService(
+    ServiceFactory<?, S> serviceFactory,
+    BiFunctionEx<? super S, ? super T, ? extends R> mapFn)
+```
+Enriches items using a shared, lifecycle-managed service (e.g., a database connection).
+
+</Accordion>
+
+<Accordion title="Debugging">
+
+```java
+BatchStage<T> peek()
+BatchStage<T> peek(FunctionEx<? super T, ? extends CharSequence> toStringFn)
+BatchStage<T> peek(PredicateEx<? super T> shouldLogFn,
+                   FunctionEx<? super T, ? extends CharSequence> toStringFn)
+```
+Logs items at INFO level without affecting the data flow. Use during development to inspect intermediate results.
+
+```java
+orders.peek(o -> "Order: " + o.getId());
+```
+
+</Accordion>
+
+<Accordion title="Sink">
+
+```java
+SinkStage writeTo(Sink<? super T> sink)
+```
+Terminates the stage by draining items to the given sink.
+
+```java
+orders.writeTo(Sinks.map("output-orders"));
+```
+
+</Accordion>
+
+</AccordionGroup>
+
+---
+
+## StreamStage
+
+A `StreamStage<T>` processes an unbounded event stream. You get one from `pipeline.readFrom(StreamSource)` after calling `.withoutTimestamps()` or `.withTimestamps(...)` on the `StreamSourceStage`.
+
+`StreamStage` supports all the same core transforms as `BatchStage` (map, filter, flatMap, mapStateful, mapUsingService, peek, writeTo), plus the following streaming-specific operations.
+
+<AccordionGroup>
+
+<Accordion title="Windowing">
+
+```java
+StageWithWindow<T> window(WindowDefinition wDef)
+```
+Adds a window definition as the first step towards windowed aggregation. Chain `.aggregate(...)` on the returned `StageWithWindow`.
+
+```java
+// Tumbling 1-minute window
+StreamStage<Map.Entry<String, Long>> windowedCounts = events
+    .window(WindowDefinition.tumbling(60_000))
+    .groupingKey(Event::getType)
+    .aggregate(AggregateOperations.counting());
+```
+
+</Accordion>
+
+<Accordion title="Merging streams">
+
+```java
+StreamStage<T> merge(StreamStage<? extends T> other)
+```
+Emits all items from both this stage and `other`. The other stage's type must be assignment-compatible.
+
+```java
+StreamStage<Event> combined = ordersStream.merge(returnsStream);
+```
+
+</Accordion>
+
+<Accordion title="Grouping">
+
+```java
+<K> StreamStageWithKey<T, K> groupingKey(FunctionEx<? super T, ? extends K> keyFn)
+```
+Groups stream items by a key. The resulting `StreamStageWithKey` is used with `window` and `aggregate`.
+
+</Accordion>
+
+<Accordion title="Rebalancing">
+
+```java
+StreamStage<T> rebalance()
+StreamStage<T> rebalance(FunctionEx<? super T, ? extends K> keyFn)
+```
+Redistributes items across processors. The keyless form breaks event order; not available when `setPreserveOrder(true)` is set.
+
+</Accordion>
+
+<Accordion title="Apply (composable transforms)">
+
+```java
+<R> StreamStage<R> apply(FunctionEx<? super StreamStage<T>, ? extends StreamStage<R>> transformFn)
+```
+Applies a reusable transform function inline, keeping the pipeline expression fluent.
+
+```java
+StreamStage<String> clean(StreamStage<String> input) {
+    return input.map(String::trim).filter(s -> !s.isEmpty());
+}
+
+pipeline.readFrom(source)
+    .withoutTimestamps()
+    .apply(this::clean)
+    .writeTo(Sinks.logger());
+```
+
+</Accordion>
+
+</AccordionGroup>
+
+---
+
+## WindowDefinition
+
+Factory methods on `WindowDefinition` create the window types supported by `StreamStage.window(...)`.
+
+<AccordionGroup>
+
+<Accordion title="Tumbling window">
+
+```java
+static WindowDefinition tumbling(long windowSize)
+```
+Fixed-size, non-overlapping windows. Each event belongs to exactly one window. `windowSize` is in the time unit of the event timestamps (typically milliseconds).
+
+```java
+// 1-minute non-overlapping windows
+WindowDefinition.tumbling(60_000)
+```
+
+</Accordion>
+
+<Accordion title="Sliding window">
+
+```java
+static WindowDefinition sliding(long windowSize, long slideBy)
+```
+Fixed-size overlapping windows that advance by `slideBy` each step. Each event can appear in multiple windows. `slideBy` must divide `windowSize` evenly.
+
+```java
+// 5-minute window sliding every 1 minute
+WindowDefinition.sliding(300_000, 60_000)
+```
+
+</Accordion>
+
+<Accordion title="Session window">
+
+```java
+static WindowDefinition session(long sessionTimeout)
+```
+Groups events into sessions separated by gaps of at least `sessionTimeout`. Sessions close after `sessionTimeout` of inactivity.
+
+```java
+// Session closes after 30 seconds of inactivity
+WindowDefinition.session(30_000)
+```
+
+</Accordion>
+
+</AccordionGroup>
+
+---
+
+## Complete streaming example
+
+```java
+import com.hazelcast.jet.JetService;
+import com.hazelcast.jet.Job;
+import com.hazelcast.jet.config.JobConfig;
+import com.hazelcast.jet.config.ProcessingGuarantee;
+import com.hazelcast.jet.pipeline.JournalInitialPosition;
+import com.hazelcast.jet.pipeline.Pipeline;
+import com.hazelcast.jet.pipeline.Sinks;
+import com.hazelcast.jet.pipeline.Sources;
+import com.hazelcast.jet.pipeline.StreamStage;
+import com.hazelcast.jet.pipeline.WindowDefinition;
+import com.hazelcast.jet.aggregate.AggregateOperations;
+
+JetService jet = hz.getJet();
+
+Pipeline p = Pipeline.create();
+
+// 1. Read from the IMap event journal (streaming)
+StreamStage<Map.Entry<String, Order>> events = p
+    .readFrom(Sources.mapJournal("orders", JournalInitialPosition.START_FROM_CURRENT))
+    .withIngestionTimestamps();  // use arrival time as event time
+
+// 2. Filter to placed orders only
+StreamStage<Order> placed = events
+    .filter(e -> "PLACED".equals(e.getValue().getStatus()))
+    .map(Map.Entry::getValue);
+
+// 3. Count orders per customer in tumbling 1-minute windows
+placed
+    .groupingKey(Order::getCustomerId)
+    .window(WindowDefinition.tumbling(60_000))
+    .aggregate(AggregateOperations.counting())
+    .writeTo(Sinks.map("order-counts-per-minute"));
+
+// 4. Submit the job
+JobConfig config = new JobConfig()
+    .setName("order-stream-counter")
+    .setProcessingGuarantee(ProcessingGuarantee.AT_LEAST_ONCE)
+    .setSnapshotIntervalMillis(5_000);
+
+Job job = jet.newJob(p, config);
+System.out.println("Streaming job running: " + job.getIdString());
+// job.join() would block forever for a streaming job
+```

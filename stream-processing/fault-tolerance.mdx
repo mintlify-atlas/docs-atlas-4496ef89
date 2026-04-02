@@ -1,0 +1,177 @@
+---
+title: "Fault tolerance"
+description: "How Jet uses distributed snapshots to recover from member failures, and how to configure processing guarantees and snapshot intervals."
+---
+
+Jet provides fault tolerance for both batch and streaming jobs through a **distributed snapshotting** mechanism. When a cluster member fails, Jet can automatically restart the job and resume from the last consistent snapshot rather than starting from scratch.
+
+## How snapshotting works
+
+Jet periodically takes a consistent snapshot of the state of all processors in the job. The snapshot captures:
+
+- The current **offset** in each source partition (e.g. the Kafka offset or IMap journal position)
+- Any **in-flight aggregation state** accumulated by transform processors
+
+Jet stores snapshots in memory and replicates them across multiple cluster members so that no single member failure causes snapshot loss.
+
+The snapshot algorithm works by injecting **barriers** into the data stream. When a processor receives a barrier on all its inputs, it saves its current state and forwards the barrier downstream. Once all processors have saved their state, the snapshot is complete and the previous snapshot can be discarded.
+
+<Info>
+Snapshots are stored in an internal `IMap`. The cluster must have enough free heap to hold at least two snapshots (current and previous) simultaneously.
+</Info>
+
+## Processing guarantees
+
+Configure the processing guarantee in `JobConfig` before submitting a job:
+
+```java
+import com.hazelcast.jet.config.JobConfig;
+import com.hazelcast.jet.config.ProcessingGuarantee;
+
+JobConfig config = new JobConfig()
+        .setProcessingGuarantee(ProcessingGuarantee.AT_LEAST_ONCE)
+        .setSnapshotIntervalMillis(10_000);
+```
+
+The `ProcessingGuarantee` enum has three values:
+
+### `NONE`
+
+```java
+ProcessingGuarantee.NONE
+```
+
+No snapshots are taken. If the job restarts, it begins from scratch. Some items may be lost and others duplicated. This option has the highest throughput and the lowest latency because there is no snapshotting overhead.
+
+Use `NONE` for jobs where correctness under failure is not required, such as live dashboards or exploratory analysis.
+
+### `AT_LEAST_ONCE`
+
+```java
+ProcessingGuarantee.AT_LEAST_ONCE
+```
+
+Snapshots are taken at the configured interval. When the job restarts, it resumes from the latest snapshot. Items that were processed after the snapshot was taken may be processed again.
+
+In `AT_LEAST_ONCE` mode, processors can continue consuming items from inputs that have already received a barrier while waiting for other inputs. This reduces the latency impact of snapshotting compared to `EXACTLY_ONCE`.
+
+Use `AT_LEAST_ONCE` when duplicate processing is acceptable and you want lower latency than `EXACTLY_ONCE`.
+
+### `EXACTLY_ONCE`
+
+```java
+ProcessingGuarantee.EXACTLY_ONCE
+```
+
+Snapshots are taken at the configured interval. When the job restarts, it resumes from the latest snapshot and each item is guaranteed to be processed exactly once.
+
+`EXACTLY_ONCE` requires that all processors wait for barriers to arrive on **all** inputs before processing further. This synchronisation increases latency and reduces throughput compared to `AT_LEAST_ONCE`.
+
+Sinks must also participate in exactly-once delivery. The built-in sinks that support it are:
+
+| Sink | Mechanism |
+|---|---|
+| `Sinks.map()` | Idempotent updates (same key = overwrite) |
+| `Sinks.files()` | Two-phase commit via atomic file rename |
+| `Sinks.jdbc()` | XA transactions |
+| `Sinks.jmsQueue()` / `Sinks.jmsTopic()` | XA transactions |
+
+<Warning>
+If a sink does not support exactly-once delivery, configure it to use at-least-once mode using the sink builder (e.g. `Sinks.jdbcBuilder().exactlyOnce(false)`). The rest of the pipeline still uses the stronger guarantee.
+</Warning>
+
+## Configuring the snapshot interval
+
+`setSnapshotIntervalMillis()` controls the time between the completion of one snapshot and the start of the next. The default is 10 seconds.
+
+```java
+JobConfig config = new JobConfig()
+        .setProcessingGuarantee(ProcessingGuarantee.EXACTLY_ONCE)
+        .setSnapshotIntervalMillis(5_000); // snapshot every 5 seconds
+```
+
+Shorter intervals mean:
+- Lower recovery time after a failure (less re-processing)
+- Higher overhead and latency during normal operation
+
+Longer intervals mean:
+- Lower overhead during normal operation
+- More re-processing after a failure
+
+## What happens when a member fails
+
+1. The **coordinator member** detects the failure.
+2. Jet terminates the job on all remaining members.
+3. If the job has a processing guarantee other than `NONE` and `autoScaling` is enabled (the default), Jet automatically restarts the job.
+4. Each processor restores its state from the last complete snapshot.
+5. Each source seeks back to the offset saved in the snapshot and resumes reading.
+
+The job transitions through `STARTING` → `RUNNING` during the restart. You can observe this via `job.getStatus()` or by registering a `JobStatusListener`:
+
+```java
+job.addStatusListener(event -> System.out.println(
+        "Job " + event.getJobName() + " changed to " + event.getNewStatus()));
+```
+
+## Suspend on failure
+
+Instead of restarting the job immediately, you can configure it to **suspend** when it fails. This preserves the snapshot state so you can inspect the job, adjust configuration, and then resume it manually.
+
+```java
+JobConfig config = new JobConfig()
+        .setProcessingGuarantee(ProcessingGuarantee.AT_LEAST_ONCE)
+        .setSuspendOnFailure(true);
+```
+
+Resume a suspended job with:
+
+```java
+job.resume();
+```
+
+## Auto-scaling
+
+By default, Jet restarts the job whenever a member joins or leaves the cluster (`autoScaling = true`). You can disable this if you want manual control:
+
+```java
+JobConfig config = new JobConfig()
+        .setAutoScaling(false);
+```
+
+With auto-scaling disabled:
+
+| Condition | Snapshots enabled | Snapshots disabled |
+|---|---|---|
+| Member added | No action | No action |
+| Member removed | Job suspended | Job fails |
+
+## Split-brain protection
+
+In a network partition, two sub-clusters may each try to restart the same job. Enable split-brain protection to ensure the job restarts only on the sub-cluster that meets the quorum (more than half of the original members):
+
+```java
+JobConfig config = new JobConfig()
+        .setSplitBrainProtection(true);
+```
+
+## Complete configuration example
+
+```java
+JobConfig config = new JobConfig()
+        .setName("order-processor")
+        .setProcessingGuarantee(ProcessingGuarantee.EXACTLY_ONCE)
+        .setSnapshotIntervalMillis(10_000)
+        .setAutoScaling(true)
+        .setSuspendOnFailure(false)
+        .setSplitBrainProtection(true);
+
+Job job = hz.getJet().newJob(pipeline, config);
+```
+
+## Idempotent sinks and exactly-once semantics
+
+Even with `EXACTLY_ONCE`, a job restart replays items that were in-flight when the failure occurred. Your sink must handle these duplicate writes correctly.
+
+The `IMap` sink is inherently idempotent because writing the same key twice simply overwrites the value. For sinks that append data (files, Kafka, JMS), Jet uses XA two-phase commit to make the writes transactional: writes are staged until the snapshot commits, then published atomically.
+
+If your external system does not support XA but has a deduplication mechanism (e.g. Kafka's idempotent producer), you can use at-least-once mode for the sink while keeping exactly-once for the rest of the pipeline.

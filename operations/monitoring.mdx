@@ -1,0 +1,227 @@
+---
+title: "Monitoring"
+description: "Monitor Hazelcast clusters with metrics collection, JMX, Management Center, LocalMapStats, health checks, and Jet job metrics. This page covers MetricsConfig, the LocalMapStats API, and the health check endpoint."
+---
+
+Hazelcast provides several monitoring mechanisms: a built-in metrics system that feeds Management Center and JMX, per-map and per-data-structure statistics, a health check HTTP endpoint, and structured logging.
+
+## Metrics configuration
+
+`MetricsConfig` (`com.hazelcast.config.MetricsConfig`) controls how Hazelcast collects and publishes metrics. By default, metrics are enabled and collected every 5 seconds.
+
+<CodeGroup>
+
+```java Java
+import com.hazelcast.config.Config;
+import com.hazelcast.config.MetricsConfig;
+import com.hazelcast.config.MetricsJmxConfig;
+import com.hazelcast.config.MetricsManagementCenterConfig;
+
+MetricsConfig metricsConfig = config.getMetricsConfig();
+metricsConfig.setEnabled(true);
+metricsConfig.setCollectionFrequencySeconds(5);
+
+// Management Center metrics retention
+metricsConfig.getManagementCenterConfig()
+             .setEnabled(true)
+             .setRetentionSeconds(5);
+
+// JMX publication
+metricsConfig.getJmxConfig()
+             .setEnabled(true);
+```
+
+```xml XML
+<metrics enabled="true">
+    <management-center enabled="true">
+        <retention-seconds>5</retention-seconds>
+    </management-center>
+    <jmx enabled="true"/>
+    <collection-frequency-seconds>5</collection-frequency-seconds>
+</metrics>
+```
+
+```yaml YAML
+hazelcast:
+  metrics:
+    enabled: true
+    management-center:
+      enabled: true
+      retention-seconds: 5
+    jmx:
+      enabled: true
+    collection-frequency-seconds: 5
+```
+
+</CodeGroup>
+
+### JMX metrics
+
+When JMX is enabled, Hazelcast registers MBeans under the `com.hazelcast` domain. You can browse them with any JMX client such as JConsole or VisualVM.
+
+Key MBean paths:
+
+- `com.hazelcast:instance=<name>,type=IMap,name=<map-name>` — map statistics
+- `com.hazelcast:instance=<name>,type=IQueue,name=<queue-name>` — queue statistics
+- `com.hazelcast:instance=<name>,type=Metrics` — aggregate cluster metrics
+
+### Management Center
+
+Management Center is the primary monitoring UI for Hazelcast clusters. Connect it to your cluster by setting the Management Center URL in the cluster configuration:
+
+```xml hazelcast.xml
+<management-center scripting-enabled="false"
+                   console-enabled="false"
+                   data-access-enabled="true">
+    <trusted-interfaces>
+        <interface>10.10.1.*</interface>
+    </trusted-interfaces>
+</management-center>
+```
+
+<Note>
+Management Center can monitor up to 3 members in the open-source edition. Larger clusters require a Management Center, Hazelcast Enterprise, or Hazelcast Enterprise HD license.
+</Note>
+
+## LocalMapStats
+
+`LocalMapStats` gives you per-member statistics for a specific `IMap`. Each member reports statistics for the partitions it owns and the backup partitions it holds.
+
+```java
+import com.hazelcast.core.HazelcastInstance;
+import com.hazelcast.map.IMap;
+import com.hazelcast.map.LocalMapStats;
+
+HazelcastInstance hz = Hazelcast.newHazelcastInstance(config);
+IMap<String, Order> orders = hz.getMap("orders");
+
+LocalMapStats stats = orders.getLocalMapStats();
+
+System.out.println("Owned entries:       " + stats.getOwnedEntryCount());
+System.out.println("Backup entries:      " + stats.getBackupEntryCount());
+System.out.println("Owned heap bytes:    " + stats.getOwnedEntryMemoryCost());
+System.out.println("Backup heap bytes:   " + stats.getBackupEntryMemoryCost());
+System.out.println("Gets:                " + stats.getGetOperationCount());
+System.out.println("Puts:                " + stats.getPutOperationCount());
+System.out.println("Removes:             " + stats.getRemoveOperationCount());
+System.out.println("Hits:                " + stats.getHits());
+System.out.println("Last update time:    " + stats.getLastUpdateTime());
+System.out.println("Last access time:    " + stats.getLastAccessTime());
+```
+
+Key `LocalMapStats` methods:
+
+| Method | Description |
+|---|---|
+| `getOwnedEntryCount()` | Number of entries this member owns. |
+| `getBackupEntryCount()` | Number of backup entries this member holds. |
+| `getOwnedEntryMemoryCost()` | Heap bytes used by owned entries. |
+| `getBackupEntryMemoryCost()` | Heap bytes used by backup entries. |
+| `getHits()` | Total number of read hits on this member. |
+| `getPutOperationCount()` | Total put operations. |
+| `getGetOperationCount()` | Total get operations. |
+| `getRemoveOperationCount()` | Total remove operations. |
+| `getLastUpdateTime()` | Timestamp of the most recent entry update. |
+
+To aggregate statistics across all members, collect `LocalMapStats` from each member and sum the values:
+
+```java
+import com.hazelcast.cluster.Member;
+
+long totalEntries = hz.getCluster().getMembers().stream()
+        .mapToLong(m -> hz.getMap("orders").getLocalMapStats().getOwnedEntryCount())
+        .sum();
+```
+
+## Cluster-wide statistics
+
+Access the cluster's general state via the `Cluster` and `PartitionService` interfaces:
+
+```java
+import com.hazelcast.cluster.Cluster;
+import com.hazelcast.partition.PartitionService;
+
+Cluster cluster = hz.getCluster();
+System.out.println("Cluster state:   " + cluster.getClusterState());
+System.out.println("Cluster time:    " + cluster.getClusterTime());
+System.out.println("Members:         " + cluster.getMembers().size());
+
+PartitionService partitions = hz.getPartitionService();
+System.out.println("Partitions:      " + partitions.getPartitions().size());
+System.out.println("Migration active: " + partitions.isClusterSafe());
+```
+
+## Health check endpoint
+
+Hazelcast exposes an HTTP health check endpoint when the REST API is enabled. Use it for load-balancer health probes and liveness/readiness checks in Kubernetes.
+
+Enable the REST API and the health-check group:
+
+```xml hazelcast.xml
+<network>
+    <rest-api enabled="true">
+        <endpoint-group name="HEALTH_CHECK" enabled="true"/>
+    </rest-api>
+</network>
+```
+
+Then query the endpoint:
+
+```bash
+# Returns HTTP 200 and "Hazelcast::NodeState=ACTIVE" when the member is healthy
+curl http://member-host:5701/hazelcast/health
+```
+
+The response includes:
+- `NodeState` — `ACTIVE`, `PASSIVE`, `FROZEN`, or `NO_MIGRATION`
+- `clusterState` — the cluster-level state
+- `clusterSize` — number of active members
+- `migrationQueueSize` — pending partition migrations
+
+## Jet job metrics
+
+The `Job` and `JobMetrics` APIs give you counters for running and completed Jet jobs.
+
+```java
+import com.hazelcast.jet.JetService;
+import com.hazelcast.jet.Job;
+import com.hazelcast.jet.core.metrics.JobMetrics;
+import com.hazelcast.jet.core.metrics.Measurement;
+
+JetService jet = hz.getJet();
+for (Job job : jet.getJobs()) {
+    System.out.println("Job: " + job.getName() + " status: " + job.getStatus());
+
+    JobMetrics metrics = job.getMetrics();
+    // Get total items emitted by all processors
+    metrics.get("emittedCount").forEach((tag, measurements) -> {
+        long total = measurements.stream()
+                .mapToLong(Measurement::value)
+                .sum();
+        System.out.println("  emittedCount: " + total);
+    });
+}
+```
+
+## Logging configuration
+
+Hazelcast uses its own logging abstraction that delegates to SLF4J, Log4j 2, JDK logging, or no-op logging. It automatically detects the available logging framework.
+
+Override the logging framework with a system property:
+
+```bash
+# Force Log4j 2
+java -Dhazelcast.logging.type=log4j2 -jar myapp.jar
+```
+
+Supported values: `slf4j`, `log4j2`, `jdk`, `none`.
+
+To reduce log noise in production, set the Hazelcast logger to `WARN` or `ERROR` in your logging configuration:
+
+```xml log4j2.xml
+<Logger name="com.hazelcast" level="WARN"/>
+```
+
+<Tip>
+Enable `DEBUG` logging only on individual logger categories (for example `com.hazelcast.internal.cluster`) rather than the entire `com.hazelcast` package. The full debug output is very verbose.
+</Tip>

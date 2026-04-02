@@ -1,0 +1,387 @@
+---
+title: "JetService API"
+description: "Reference for Hazelcast Jet. Covers JetService, Job, JobConfig, JobStatus, and ProcessingGuarantee for submitting and managing distributed batch and streaming jobs."
+---
+
+`JetService` is the entry point for Hazelcast's distributed computation engine. You submit `Pipeline` or `DAG` jobs to the cluster and receive a `Job` handle to monitor and control them.
+
+Obtain `JetService` from `HazelcastInstance`:
+
+```java
+JetService jet = hz.getJet();
+```
+
+---
+
+## JetService
+
+### Submitting jobs
+
+<AccordionGroup>
+
+<Accordion title="newJob — standard jobs">
+
+```java
+Job newJob(Pipeline pipeline)
+Job newJob(Pipeline pipeline, JobConfig config)
+Job newJob(DAG dag)
+Job newJob(DAG dag, JobConfig config)
+```
+
+Submits a job and returns immediately. The job starts executing asynchronously. If a `JobConfig` with a non-null name is provided and a job with that name is already active, `JobAlreadyExistsException` is thrown.
+
+```java
+Pipeline p = Pipeline.create();
+// build pipeline...
+
+Job job = jet.newJob(p, new JobConfig().setName("order-processor"));
+job.join(); // block until complete
+```
+
+</Accordion>
+
+<Accordion title="newJobIfAbsent — idempotent submission">
+
+```java
+Job newJobIfAbsent(Pipeline pipeline, JobConfig config)
+Job newJobIfAbsent(DAG dag, JobConfig config)
+```
+
+Like `newJob`, but if an active job with the given name already exists, it joins that job instead of submitting a duplicate. Useful in microservice deployments where each service restart should not spawn a second job.
+
+```java
+JobConfig config = new JobConfig().setName("inventory-sync");
+Job job = jet.newJobIfAbsent(pipeline, config);
+```
+
+</Accordion>
+
+<Accordion title="newLightJob — low-latency jobs">
+
+```java
+Job newLightJob(Pipeline pipeline)
+Job newLightJob(Pipeline pipeline, JobConfig config)
+Job newLightJob(DAG dag)
+Job newLightJob(DAG dag, JobConfig config)
+```
+
+Submits a **light job** using a single cluster operation instead of two, reducing startup overhead to milliseconds. Light jobs have these limitations:
+
+- No processing guarantee (no snapshotting)
+- No custom classes or job resources — all code must be on the cluster classpath
+- Metrics are not accessible via `Job.getMetrics()`
+- Failures are logged but no job record is retained after completion
+- `RestartableException` causes the job to fail rather than restart
+
+```java
+Job lightJob = jet.newLightJob(pipeline);
+lightJob.join();
+```
+
+</Accordion>
+
+<Accordion title="newJobBuilder — fluent builder API (since 5.5)">
+
+```java
+JobBuilder newJobBuilder(Pipeline pipeline)
+JobBuilder newJobBuilder(DAG dag)
+```
+
+Provides a fluent builder with additional options such as member selection.
+
+```java
+Job job = jet.newJobBuilder(pipeline)
+    .withConfig(new JobConfig().setName("etl-job"))
+    .withMemberSelector(JetMemberSelector.ALL_LITE_MEMBERS)
+    .start();
+```
+
+</Accordion>
+
+</AccordionGroup>
+
+### Querying jobs
+
+```java
+List<Job> getJobs()
+```
+Returns all submitted jobs, including completed normal jobs. Completed light jobs are not included.
+
+```java
+Job getJob(long jobId)
+```
+Returns the job with the given ID, or `null` if not found.
+
+```java
+List<Job> getJobs(String name)
+```
+Returns all jobs submitted with the given name, ordered by submission time descending (the active job is first).
+
+```java
+Job getJob(String name)
+```
+Returns the most-recent (active or last) job with the given name, or `null`.
+
+```java
+// Find and cancel a job by name
+Job job = jet.getJob("order-processor");
+if (job != null) {
+    job.cancel();
+}
+```
+
+### Observables
+
+```java
+<T> Observable<T> getObservable(String name)
+<T> Observable<T> newObservable()
+Collection<Observable<?>> getObservables()
+```
+
+`Observable` lets you stream job results to the client. Use it with `Sinks.observable(name)` in the pipeline and then register an `Observer` on the client side.
+
+```java
+Observable<String> obs = jet.newObservable();
+obs.addObserver(item -> System.out.println("Result: " + item));
+
+Pipeline p = Pipeline.create();
+p.readFrom(Sources.list("input"))
+ .writeTo(Sinks.observable(obs.name()));
+
+jet.newLightJob(p).join();
+obs.destroy();
+```
+
+---
+
+## Job
+
+A `Job` is a handle to a submitted computation. Use it to monitor status, block for completion, and manage the job lifecycle.
+
+### Identity and metadata
+
+<ResponseField name="getId()" type="long">
+  Returns the unique numeric ID assigned when the job was submitted.
+</ResponseField>
+
+<ResponseField name="getIdString()" type="String">
+  Returns the ID formatted as a human-readable hex string.
+</ResponseField>
+
+<ResponseField name="getName()" type="String">
+  Returns the job name from `JobConfig`, or `null` if no name was set. Light jobs always return `null`.
+</ResponseField>
+
+<ResponseField name="getSubmissionTime()" type="long">
+  Returns the epoch-millisecond timestamp when the job was first submitted.
+</ResponseField>
+
+<ResponseField name="isLightJob()" type="boolean">
+  Returns `true` if this is a light job. Many methods throw `UnsupportedOperationException` for light jobs.
+</ResponseField>
+
+### Status and completion
+
+<ResponseField name="getStatus()" type="JobStatus">
+  Queries the job coordinator for the current status. See [JobStatus](#jobstatus) below.
+</ResponseField>
+
+<ResponseField name="getFuture()" type="CompletableFuture&lt;Void&gt;">
+  Returns the future associated with the job. The future completes when the job finishes. The returned future is not cancellable — use `cancel()` instead.
+</ResponseField>
+
+<ResponseField name="join()" type="void">
+  Blocks until the job completes. Throws `CancellationException` if the job is cancelled. Never returns for unbounded streaming jobs unless they fail or are cancelled. Shorthand for `getFuture().join()`.
+</ResponseField>
+
+<ResponseField name="isUserCancelled()" type="boolean">
+  Returns `true` if the job was explicitly cancelled by a user. Only valid after the job has finished. Since 5.3.
+</ResponseField>
+
+### Lifecycle control
+
+<ResponseField name="cancel()" type="void">
+  Requests cancellation. The job stops on all members asynchronously. After cancellation, `join()` throws `CancellationException`. The final status is `FAILED`.
+</ResponseField>
+
+<ResponseField name="suspend()" type="void">
+  Gracefully pauses the job, saving a snapshot. The job can be resumed later. Throws `UnsupportedOperationException` for light jobs.
+</ResponseField>
+
+<ResponseField name="resume()" type="void">
+  Resumes a suspended job. Throws if the job is not in `SUSPENDED` status.
+</ResponseField>
+
+<ResponseField name="restart()" type="void">
+  Stops and restarts the job on the current cluster membership. Useful to force rebalancing after scaling. Throws `UnsupportedOperationException` for light jobs.
+</ResponseField>
+
+### Configuration and observability
+
+<ResponseField name="getConfig()" type="JobConfig">
+  Returns the `JobConfig` the job was submitted with. The returned object is a snapshot; changes have no effect.
+</ResponseField>
+
+<ResponseField name="getMetrics()" type="JobMetrics">
+  Returns a snapshot of job-specific metrics. Requires that global and per-job metrics collection are enabled. Not available for light jobs.
+</ResponseField>
+
+<ResponseField name="getSuspensionCause()" type="JobSuspensionCause">
+  Returns the reason the job was suspended. Throws `IllegalStateException` if the job is not currently suspended. Not available for light jobs.
+</ResponseField>
+
+### Status listeners
+
+```java
+UUID addStatusListener(JobStatusListener listener)   // since 5.3
+boolean removeStatusListener(UUID registrationId)    // since 5.3
+```
+
+The listener is automatically removed after a terminal event (job completed, failed, or cancelled).
+
+---
+
+## JobConfig
+
+`JobConfig` configures a job before submission.
+
+<AccordionGroup>
+
+<Accordion title="Naming and identity">
+
+```java
+JobConfig setName(String name)
+```
+Sets a human-readable name. At most one job with a given name can be active at a time.
+
+```java
+new JobConfig().setName("nightly-etl");
+```
+
+</Accordion>
+
+<Accordion title="Processing guarantee">
+
+```java
+JobConfig setProcessingGuarantee(ProcessingGuarantee guarantee)
+JobConfig setSnapshotIntervalMillis(long intervalMillis)
+```
+
+Sets the fault-tolerance level and how frequently state snapshots are taken. See [ProcessingGuarantee](#processingguarantee).
+
+```java
+new JobConfig()
+    .setProcessingGuarantee(ProcessingGuarantee.EXACTLY_ONCE)
+    .setSnapshotIntervalMillis(10_000); // snapshot every 10 s
+```
+
+</Accordion>
+
+<Accordion title="Code deployment">
+
+```java
+JobConfig addClass(Class<?>... classes)
+JobConfig addJar(URL jar)
+JobConfig addPackage(String... packages)
+```
+
+Add classes or JAR files to the job classpath. These are distributed to all cluster members so the job code does not need to be on the member's classpath in advance.
+
+```java
+new JobConfig().addClass(MyMapper.class, MyFilter.class);
+```
+
+</Accordion>
+
+<Accordion title="Metrics">
+
+```java
+JobConfig setMetricsEnabled(boolean enabled)
+JobConfig setStoreMetricsAfterJobCompletion(boolean enabled)
+```
+
+Controls per-job metrics. When `storeMetricsAfterJobCompletion` is `true`, metrics are preserved after successful completion so you can query them via `Job.getMetrics()`.
+
+</Accordion>
+
+</AccordionGroup>
+
+---
+
+## JobStatus
+
+`JobStatus` represents the lifecycle state of a job.
+
+| Value | Description |
+|---|---|
+| `NOT_RUNNING` | Submitted but not yet started, or restarting after a failure |
+| `STARTING` | In the process of starting |
+| `RUNNING` | Actively executing |
+| `SUSPENDED` | Paused; a snapshot has been saved and the job can be resumed |
+| `SUSPENDED_EXPORTING_SNAPSHOT` | Suspended and exporting a terminal snapshot |
+| `COMPLETING` | Finishing normally (batch job) |
+| `FAILED` | Terminated with an error, or cancelled |
+| `COMPLETED` | Finished successfully |
+
+```java
+Job job = jet.newJob(pipeline);
+if (job.getStatus() == JobStatus.RUNNING) {
+    System.out.println("Job is running");
+}
+```
+
+---
+
+## ProcessingGuarantee
+
+`ProcessingGuarantee` controls the fault-tolerance semantics for streaming jobs.
+
+| Value | Description |
+|---|---|
+| `NONE` | No snapshots. On restart, items may be lost or reprocessed |
+| `AT_LEAST_ONCE` | Each item is processed at least once. Snapshots are taken but offsets are committed early |
+| `EXACTLY_ONCE` | Each item is processed exactly once. Requires two-phase commit support from sources and sinks |
+
+```java
+new JobConfig().setProcessingGuarantee(ProcessingGuarantee.AT_LEAST_ONCE);
+```
+
+<Warning>
+`EXACTLY_ONCE` adds latency because records are only visible to sinks after a snapshot commits. Not all sources and sinks support it. Check the connector documentation before using it.
+</Warning>
+
+---
+
+## Complete example
+
+```java
+import com.hazelcast.jet.JetService;
+import com.hazelcast.jet.Job;
+import com.hazelcast.jet.config.JobConfig;
+import com.hazelcast.jet.config.ProcessingGuarantee;
+import com.hazelcast.jet.core.JobStatus;
+import com.hazelcast.jet.pipeline.Pipeline;
+import com.hazelcast.jet.pipeline.Sources;
+import com.hazelcast.jet.pipeline.Sinks;
+
+JetService jet = hz.getJet();
+
+// Build a batch pipeline
+Pipeline pipeline = Pipeline.create();
+pipeline.readFrom(Sources.map("input-map"))
+        .map(entry -> entry.getKey() + "=" + entry.getValue())
+        .writeTo(Sinks.list("output-list"));
+
+// Configure and submit
+JobConfig config = new JobConfig()
+    .setName("map-to-list")
+    .setProcessingGuarantee(ProcessingGuarantee.NONE);
+
+Job job = jet.newJob(pipeline, config);
+System.out.println("Job ID: " + job.getIdString());
+System.out.println("Status: " + job.getStatus());
+
+// Block until complete
+job.join();
+System.out.println("Final status: " + job.getStatus()); // COMPLETED
+```
